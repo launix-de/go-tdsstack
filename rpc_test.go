@@ -1,0 +1,335 @@
+/* Copyright (C) 2026 Carl-Philip Hänsch
+SPDX-License-Identifier: GPL-3.0-or-later */
+
+package tds
+
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"fmt"
+	"net"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func rawClient(t *testing.T, dsn string) net.Conn {
+	t.Helper()
+	values := map[string]string{}
+	for _, p := range strings.Split(dsn, ";") {
+		k, v, ok := strings.Cut(p, "=")
+		if ok {
+			values[k] = v
+		}
+	}
+	c, e := net.Dial("tcp", net.JoinHostPort(values["server"], values["port"]))
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { c.Close() })
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	if e = writeTDSMessage(c, 0x12, []byte{1, 0, 6, 0, 1, 255, 2}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = readTDSMessage(c); e != nil {
+		t.Fatal(e)
+	}
+	data := make([]byte, 94)
+	binary.LittleEndian.PutUint32(data[4:], 0x74000004)
+	for _, v := range []struct {
+		index    int
+		text     string
+		password bool
+	}{{40, "alice", false}, {44, "secret", true}, {68, "fixture", false}} {
+		text := tdsUTF16(v.text)
+		if v.password {
+			for i, b := range text {
+				text[i] = (b<<4 | b>>4) ^ 0xa5
+			}
+		}
+		binary.LittleEndian.PutUint16(data[v.index:], uint16(len(data)))
+		binary.LittleEndian.PutUint16(data[v.index+2:], uint16(len(text)/2))
+		data = append(data, text...)
+	}
+	binary.LittleEndian.PutUint32(data, uint32(len(data)))
+	if e = writeTDSMessage(c, 0x10, data); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = readTDSMessage(c); e != nil {
+		t.Fatal(e)
+	}
+	return c
+}
+func exchange(t *testing.T, c net.Conn, id uint16, p ...Parameter) []byte {
+	t.Helper()
+	if e := writeTDSMessage(c, 3, encodeRPC(id, p...)); e != nil {
+		t.Fatal(e)
+	}
+	m, e := readTDSMessage(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return m.data
+}
+func intParam(name string, n int64, output bool) Parameter {
+	flags := byte(0)
+	if output {
+		flags = 1
+	}
+	return Parameter{Name: name, Flags: flags, Type: WireType{Kind: 0x26, Size: 4}, Value: n}
+}
+func textParam(text string) Parameter {
+	return Parameter{Type: WireType{Kind: 0xe7, Size: 65535}, Value: text}
+}
+func returnInt(data []byte, name string, ordinal uint16) (int32, bool) {
+	var prefix bytes.Buffer
+	prefix.WriteByte(0xac)
+	tdsU16(&prefix, ordinal)
+	tdsBText(&prefix, name)
+	prefix.WriteByte(1)
+	tdsU32(&prefix, 0)
+	tdsU16(&prefix, 0)
+	prefix.Write([]byte{0x26, 4, 4})
+	at := bytes.Index(data, prefix.Bytes())
+	if at < 0 || at+prefix.Len()+4 > len(data) {
+		return 0, false
+	}
+	return int32(binary.LittleEndian.Uint32(data[at+prefix.Len():])), true
+}
+func rowIntPattern(n int64, cursor bool) []byte {
+	var b bytes.Buffer
+	b.WriteByte(0xd1)
+	b.Write(encodeWireValue(fixtureColumn("v", 0x26, 8), n))
+	if cursor {
+		b.Write(encodeWireValue(fixtureColumn("rowstat", 0x26, 4), int64(1)))
+	}
+	return b.Bytes()
+}
+func TestPreparedWireLifecycleAndPureDescribe(t *testing.T) {
+	var executions, descriptions atomic.Int64
+	_, dsn, _ := startClient(t, false, func(s *Server) {
+		describe := s.Handler.Describe
+		execute := s.Handler.Execute
+		s.Handler.Describe = func(ctx context.Context, session Session, r Request) ([]Column, error) {
+			descriptions.Add(1)
+			return describe(ctx, session, r)
+		}
+		s.Handler.Execute = func(ctx context.Context, session Session, r Request, w ResultWriter) error {
+			executions.Add(1)
+			return execute(ctx, session, r, w)
+		}
+	})
+	c := rawClient(t, dsn)
+	data := exchange(t, c, 11, intParam("handle", 0, true), textParam("@v bigint"), textParam("SELECT parameter"), intParam("", 1, false))
+	handle, ok := returnInt(data, "handle", 0)
+	if !ok || handle <= 0 || executions.Load() != 0 || descriptions.Load() != 1 {
+		t.Fatal(handle, ok, executions.Load(), descriptions.Load(), fmt.Sprintf("%x", data))
+	}
+	data = exchange(t, c, 12, intParam("", int64(handle), false), intParam("@v", 42, false))
+	if !bytes.Contains(data, rowIntPattern(42, false)) {
+		t.Fatal("prepared value", fmt.Sprintf("%x", data))
+	}
+	exchange(t, c, 15, intParam("", int64(handle), false))
+	data = exchange(t, c, 12, intParam("", int64(handle), false), intParam("@v", 42, false))
+	if !bytes.Contains(data, tdsUTF16("unknown prepared handle")) {
+		t.Fatal("unprepare did not invalidate")
+	}
+	data = exchange(t, c, 11, intParam("bad", 0, true), textParam(""), textParam("SELECT forbidden"))
+	if _, ok = returnInt(data, "bad", 0); ok || executions.Load() != 1 {
+		t.Fatal("failed pure describe published handle or executed")
+	}
+	data = exchange(t, c, 13, intParam("execute", 0, true), textParam("@v bigint"), textParam("SELECT parameter"), intParam("@v", 77, false))
+	handle, ok = returnInt(data, "execute", 0)
+	if !ok || !bytes.Contains(data, rowIntPattern(77, false)) {
+		t.Fatal("prepare execute")
+	}
+	exchange(t, c, 15, intParam("", int64(handle), false))
+}
+func TestStaticCursorWireOpenFetchInfoClose(t *testing.T) {
+	_, dsn, _ := startClient(t, false)
+	c := rawClient(t, dsn)
+	data := exchange(t, c, 2, intParam("cursor", 0, true), textParam("SELECT many"), intParam("scroll", 8, true), intParam("concurrency", 1, true), intParam("count", 0, true))
+	handle, ok := returnInt(data, "cursor", 0)
+	if !ok || handle <= 0 {
+		t.Fatal("cursor handle", fmt.Sprintf("%x", data))
+	}
+	count, ok := returnInt(data, "count", 4)
+	if !ok || count != 400 {
+		t.Fatal(count, ok)
+	}
+	for _, fixture := range []struct{ mode, row, n, want int64 }{{1, 0, 3, 0}, {2, 0, 2, 3}, {16, 399, 2, 398}, {8, 0, 2, 398}, {4, 0, 2, 396}} {
+		data = exchange(t, c, 7, intParam("", int64(handle), false), intParam("", fixture.mode, false), intParam("", fixture.row, false), intParam("", fixture.n, false))
+		if !bytes.Contains(data, rowIntPattern(fixture.want, true)) {
+			t.Fatal(fixture, fmt.Sprintf("%x", data))
+		}
+	}
+	data = exchange(t, c, 7, intParam("", int64(handle), false), intParam("", 256, false), intParam("position", 0, true), intParam("total", 0, true))
+	position, ok := returnInt(data, "position", 2)
+	count, ok2 := returnInt(data, "total", 3)
+	if !ok || !ok2 || position != 397 || count != 400 {
+		t.Fatal(position, count, ok, ok2)
+	}
+	exchange(t, c, 9, intParam("", int64(handle), false))
+	data = exchange(t, c, 7, intParam("", int64(handle), false))
+	if !bytes.Contains(data, tdsUTF16("unknown TDS cursor handle")) {
+		t.Fatal("closed cursor retained")
+	}
+}
+func TestTransactionManagerSuccessorActions(t *testing.T) {
+	actions := make(chan TransactionAction, 8)
+	_, dsn, _ := startClient(t, false, func(s *Server) {
+		s.Handler.Transaction = func(_ context.Context, _ Session, r TransactionRequest) (Completion, error) {
+			actions <- r.Action
+			state := TransactionStarted
+			if r.Action == Commit {
+				state = TransactionCommitted
+			}
+			if r.Action == Rollback {
+				state = TransactionRolledBack
+			}
+			return Completion{Transaction: state}, nil
+		}
+	})
+	c := rawClient(t, dsn)
+	send := func(tx uint64, payload []byte) []byte {
+		data := append(allHeaders(tx), payload...)
+		if e := writeTDSMessage(c, 14, data); e != nil {
+			t.Fatal(e)
+		}
+		m, e := readTDSMessage(c)
+		if e != nil {
+			t.Fatal(e)
+		}
+		return m.data
+	}
+	data := send(0, []byte{5, 0, 2, 0})
+	at := bytes.Index(data, []byte{0xe3, 11, 0, 8, 8})
+	if at < 0 {
+		t.Fatal("begin environment", fmt.Sprintf("%x", data))
+	}
+	transaction := binary.LittleEndian.Uint64(data[at+5:])
+	data = send(transaction, []byte{7, 0, 0, 1, 2, 0})
+	if !bytes.Contains(data, []byte{0xe3, 11, 0, 9, 0, 8}) || !bytes.Contains(data, []byte{0xe3, 11, 0, 8, 8}) {
+		t.Fatal("successor environments", fmt.Sprintf("%x", data))
+	}
+	for _, want := range []TransactionAction{Begin, Commit, Begin} {
+		select {
+		case action := <-actions:
+			if action != want {
+				t.Fatal(action, want)
+			}
+		default:
+			t.Fatal("missing action")
+		}
+	}
+}
+func TestCursorRejectsMutableApplicationPayloadReuse(t *testing.T) {
+	s := &snapshotWriter{ctx: context.Background()}
+	column := Column{Name: "b", WireType: WireType{Kind: 0xa5, Size: 8}}
+	if e := s.Fields([]Column{column}); e != nil {
+		t.Fatal(e)
+	}
+	payload := []byte{1, 2, 3}
+	if e := s.Row([]any{payload}); e != nil {
+		t.Fatal(e)
+	}
+	payload[0] = 9
+	if s.rows[0][0].([]byte)[0] != 1 {
+		t.Fatal("snapshot borrowed mutable row")
+	}
+}
+
+func TestAttentionDuringPurePrepareDoesNotPublishHandle(t *testing.T) {
+	entered := make(chan struct{})
+	_, dsn, _ := startClient(t, false, func(s *Server) {
+		describe := s.Handler.Describe
+		s.Handler.Describe = func(ctx context.Context, session Session, r Request) ([]Column, error) {
+			if r.Text == "SELECT waiting describe" {
+				close(entered)
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			return describe(ctx, session, r)
+		}
+	})
+	c := rawClient(t, dsn)
+	if e := writeTDSMessage(c, 3, encodeRPC(11, intParam("handle", 0, true), textParam(""), textParam("SELECT waiting describe"))); e != nil {
+		t.Fatal(e)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("describe not entered")
+	}
+	if e := writeTDSMessage(c, 6, nil); e != nil {
+		t.Fatal(e)
+	}
+	m, e := readTDSMessage(c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, ok := returnInt(m.data, "handle", 0); ok || !bytes.Contains(m.data, []byte{0xfd, 0x20, 0}) {
+		t.Fatal("cancelled prepare published handle", fmt.Sprintf("%x", m.data))
+	}
+	data := exchange(t, c, 11, intParam("handle", 0, true), textParam(""), textParam("SELECT 1"))
+	if handle, ok := returnInt(data, "handle", 0); !ok || handle != 1 {
+		t.Fatal("cancelled prepare consumed handle", handle, ok)
+	}
+}
+func TestFailedTransactionCompletionDoesNotBeginSuccessor(t *testing.T) {
+	actions := make(chan TransactionAction, 4)
+	_, dsn, _ := startClient(t, false, func(s *Server) {
+		s.Handler.Transaction = func(_ context.Context, _ Session, r TransactionRequest) (Completion, error) {
+			actions <- r.Action
+			if r.Action == Commit {
+				return Completion{}, fmt.Errorf("completion failed")
+			}
+			return Completion{Transaction: TransactionStarted}, nil
+		}
+	})
+	c := rawClient(t, dsn)
+	send := func(tx uint64, payload []byte) []byte {
+		if e := writeTDSMessage(c, 14, append(allHeaders(tx), payload...)); e != nil {
+			t.Fatal(e)
+		}
+		m, e := readTDSMessage(c)
+		if e != nil {
+			t.Fatal(e)
+		}
+		return m.data
+	}
+	data := send(0, []byte{5, 0, 2, 0})
+	at := bytes.Index(data, []byte{0xe3, 11, 0, 8, 8})
+	if at < 0 {
+		t.Fatal("missing begin")
+	}
+	tx := binary.LittleEndian.Uint64(data[at+5:])
+	data = send(tx, []byte{7, 0, 0, 1, 2, 0})
+	if !bytes.Contains(data, tdsUTF16("completion failed")) {
+		t.Fatal("completion error missing")
+	}
+	if len(actions) != 2 {
+		t.Fatal("successor invoked after error")
+	}
+}
+func TestFailedPreparedPublicationRemovesHandle(t *testing.T) {
+	s := &Server{Handler: Handler{Describe: func(context.Context, Session, Request) ([]Column, error) { return nil, nil }, Execute: func(context.Context, Session, Request, ResultWriter) error { return nil }}}
+	c := &connection{ctx: context.Background(), server: s, database: "fixture"}
+	err := c.execute(tdsMessage{kind: 3, data: encodeRPC(11, intParam("handle", 0, true), textParam(""), textParam("opaque text"))}, failedConnection{})
+	if err == nil || len(c.prepared) != 0 || c.preparedBytes != 0 {
+		t.Fatal("failed publish retained prepared handle", err, len(c.prepared), c.preparedBytes)
+	}
+}
+
+type failedConnection struct{}
+
+func (failedConnection) Read([]byte) (int, error)         { return 0, fmt.Errorf("closed") }
+func (failedConnection) Write([]byte) (int, error)        { return 0, fmt.Errorf("closed") }
+func (failedConnection) Close() error                     { return nil }
+func (failedConnection) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (failedConnection) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (failedConnection) SetDeadline(time.Time) error      { return nil }
+func (failedConnection) SetReadDeadline(time.Time) error  { return nil }
+func (failedConnection) SetWriteDeadline(time.Time) error { return nil }

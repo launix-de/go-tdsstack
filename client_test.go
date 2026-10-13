@@ -43,6 +43,19 @@ func startClient(t *testing.T, encrypted bool, configure ...func(*Server)) (*sql
 	}
 	s.Handler.Execute = func(ctx context.Context, _ Session, r Request, w ResultWriter) error {
 		switch r.Text {
+		case "SELECT batches":
+			for _, c := range []Completion{{Rows: 2, More: true}, {Rows: 3, More: true}} {
+				if err := w.Done(c); err != nil {
+					return err
+				}
+			}
+			if err := w.Fields([]Column{fixtureColumn("v", 0x26, 8)}); err != nil {
+				return err
+			}
+			if err := w.Row([]any{int64(33)}); err != nil {
+				return err
+			}
+			return w.Done(Completion{Rows: 1})
 		case "SELECT 1":
 			if err := w.Fields([]Column{fixtureColumn("v", 0x26, 8)}); err != nil {
 				return err
@@ -142,6 +155,14 @@ func startClient(t *testing.T, encrypted bool, configure ...func(*Server)) (*sql
 	t.Cleanup(func() { db.Close() })
 	return db, dsn, s
 }
+func TestReleasedClientConsecutiveCompletions(t *testing.T) {
+	db, _, _ := startClient(t, false)
+	var v int64
+	if err := db.QueryRow("SELECT batches").Scan(&v); err != nil || v != 33 {
+		t.Fatalf("result after consecutive metadata-free completions: %d, %v", v, err)
+	}
+}
+
 func TestReleasedClientAuthTLSAndTypedResults(t *testing.T) {
 	for _, tlsEnabled := range []bool{false, true} {
 		t.Run(fmt.Sprint(tlsEnabled), func(t *testing.T) {

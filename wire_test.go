@@ -131,6 +131,38 @@ func TestResultStrictMetadataAndFraming(t *testing.T) {
 		t.Fatal("second result metadata", e)
 	}
 }
+func TestConsecutiveCompletionsWithoutMetadata(t *testing.T) {
+	var b bytes.Buffer
+	var completions []Completion
+	r := &resultWriter{w: &b, completion: func(c Completion) error {
+		completions = append(completions, c)
+		return nil
+	}}
+	for _, c := range []Completion{{Rows: 2, More: true}, {Rows: 3, More: true}, {NoCount: true}} {
+		if err := r.Done(c); err != nil {
+			t.Fatal(err)
+		}
+		if r.Row([]any{int64(1)}) == nil {
+			t.Fatal("completion must not admit rows without metadata")
+		}
+	}
+	if len(completions) != 3 || b.Len() != 39 {
+		t.Fatalf("completion callbacks or tokens missing: %d / %d", len(completions), b.Len())
+	}
+	for i, expected := range []struct {
+		status uint16
+		rows   uint64
+	}{{0x11, 2}, {0x11, 3}, {0, 0}} {
+		token := b.Bytes()[i*13 : (i+1)*13]
+		if token[0] != 0xfd || binary.LittleEndian.Uint16(token[1:3]) != expected.status || binary.LittleEndian.Uint64(token[5:13]) != expected.rows {
+			t.Fatalf("unexpected completion %d: %x", i, token)
+		}
+	}
+	if r.Done(Completion{}) == nil || len(completions) != 3 || b.Len() != 39 {
+		t.Fatal("a final completion must reject further completions before callbacks or writes")
+	}
+}
+
 func TestMalformedHeadersUTF16PLPAndCollation(t *testing.T) {
 	for _, x := range [][]byte{nil, {4, 0, 0}, {4, 0, 0, 0}, append(allHeaders(0), 0)} {
 		if len(x) > 22 {

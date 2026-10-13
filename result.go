@@ -53,6 +53,7 @@ type resultWriter struct {
 	ctx            context.Context
 	columns        []Column
 	fields, done   bool
+	more           bool // Protected by mu; a preceding completion admits another result without metadata.
 	count          uint64
 	browseMetadata bool
 	rpc            bool
@@ -323,7 +324,7 @@ func (r *resultWriter) Done(c Completion) error {
 	if r.err != nil {
 		return r.err
 	}
-	if r.done {
+	if r.done && !r.more {
 		return fmt.Errorf("result already completed")
 	}
 	if r.completion != nil {
@@ -349,6 +350,7 @@ func (r *resultWriter) Done(c Completion) error {
 	tdsDone(&b, token, status, c.Rows)
 	r.err = tdsWriteAll(r.w, b.Bytes())
 	r.done = true
+	r.more = c.More
 	r.fields = false
 	r.columns = nil
 	return r.err

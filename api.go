@@ -103,7 +103,7 @@ type TransactionRequest struct {
 	SuccessorIsolation byte
 }
 
-// ResultWriter permits sequential result sets and serializes parallel row
+// ResultWriter permits sequential result sets and serializes parallel output
 // callbacks. Fields must precede rows; Done ends one result. Methods return wire
 // errors and never synthesize descriptors or perform SQL conversion.
 type ResultWriter interface {

@@ -47,8 +47,8 @@ func (c *connection) removeCursor(handle int32) {
 	}
 }
 
-// snapshotWriter owns native decoded payloads only. Each stored row is cloned
-// and prevalidated; it never retains application codecs or invocation state.
+// snapshotWriter belongs to one invocation. It clones and prevalidates rows;
+// only native payloads enter cursorSnapshot, never this output or request context.
 type snapshotWriter struct {
 	output       *resultWriter
 	columns      []Column

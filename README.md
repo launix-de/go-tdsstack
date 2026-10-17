@@ -54,6 +54,9 @@ Use `int64`, `float64`, `bool`, `string`, `[]byte`, or `nil` for ordinary wire v
 conversion occurs. `Temporal` carries day ordinal, wire clock units and original
 offset minutes. These are transient protocol payloads, not persistent SQL types.
 The application performs scale, precision, calendar and implicit-cast semantics.
+GUIDTYPE (`0x24`) requires descriptor size 16 and either `nil` or a 16-byte
+`[]byte` in wire order. Input bytes are copied, and output bytes are transmitted
+unchanged; text parsing, formatting and byte-order conversion belong to the application.
 
 Prepared handles retain only opaque text and declarations. Cursor snapshots retain
 only bounded, cloned native payloads. Neither retains a query context, transaction,

@@ -316,6 +316,22 @@ func (d *tdsDecoder) parameter() any {
 	kind := d.u8()
 	d.descriptor = WireType{Kind: kind}
 	switch kind {
+	case 0x24: // GUIDTYPE: payload byte order is owned by the application.
+		maxSize := d.u8()
+		d.descriptor.Size = int(maxSize)
+		n := d.u8()
+		if maxSize != 16 || n != 0 && n != 16 {
+			d.err = fmt.Errorf("invalid TDS GUID length")
+			return nil
+		}
+		if n == 0 {
+			return nil
+		}
+		value := d.take(16)
+		if d.err != nil {
+			return nil
+		}
+		return append([]byte(nil), value...)
 	case 0x23, 0x63, 0x22: // legacy TEXT, NTEXT and IMAGE input parameters
 		maxSize := d.u32()
 		d.descriptor.Size = int(maxSize)

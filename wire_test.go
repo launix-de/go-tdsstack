@@ -310,11 +310,12 @@ func TestInformationMessageEncodingBounds(t *testing.T) {
 	} {
 		var b bytes.Buffer
 		w := &resultWriter{w: &b}
-		if w.Message(message) == nil || b.Len() != 0 {
+		err := w.Message(message)
+		if err == nil || b.Len() != 0 {
 			t.Fatalf("invalid information published partial framing: %#v", message)
 		}
-		if err := w.Message(Diagnostic{Text: "valid successor"}); err != nil {
-			t.Fatal("rejected payload poisoned an untouched response", err)
+		if w.Message(Diagnostic{Text: "valid successor"}) != err || w.Done(Completion{}) != err || b.Len() != 0 {
+			t.Fatal("rejected diagnostic payload did not retain its encoding failure")
 		}
 	}
 }

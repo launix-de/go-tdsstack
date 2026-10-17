@@ -381,3 +381,26 @@ func TestCursorInformationWireFailureDoesNotPublishHandle(t *testing.T) {
 		t.Fatal("failed information delivery admitted a cursor", messageError, err, c.nextCursor, c.cursorBytes)
 	}
 }
+
+func TestCursorInformationRejectedPayloadDoesNotPublishHandle(t *testing.T) {
+	_, dsn, _ := startClient(t, false, func(s *Server) {
+		execute := s.Handler.Execute
+		s.Handler.Execute = func(ctx context.Context, session Session, request Request, w ResultWriter) error {
+			if request.Cursor {
+				// A handler ignoring a payload-encoding error must not turn an
+				// incomplete response into an admitted cursor snapshot.
+				_ = w.Message(Diagnostic{Procedure: strings.Repeat("x", 256)})
+			}
+			return execute(ctx, session, request, w)
+		}
+	})
+	c := rawClient(t, dsn)
+	data := exchange(t, c, 2, intParam("cursor", 0, true), textParam("SELECT many"),
+		intParam("scroll", 8, true), intParam("concurrency", 1, true), intParam("count", 0, true))
+	if handle, ok := returnInt(data, "cursor", 0); ok && handle > 0 {
+		t.Fatalf("ignored invalid diagnostic admitted cursor %d", handle)
+	}
+	if len(data) == 0 || data[0] != 0xaa || !bytes.Contains(data, tdsUTF16("information fields exceed wire length limits")) {
+		t.Fatalf("missing diagnostic encoding rejection: %x", data)
+	}
+}

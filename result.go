@@ -77,7 +77,10 @@ func (r *resultWriter) Message(d Diagnostic) error {
 	}
 	data, err := tdsInfo(d)
 	if err != nil {
-		return err
+		// Like row-payload encoding failures, an invalid diagnostic cannot be
+		// ignored by the handler and later admitted as a successful response.
+		r.err = err
+		return r.err
 	}
 	r.err = tdsWriteAll(r.w, data)
 	return r.err

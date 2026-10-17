@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -296,6 +297,39 @@ func TestResultConcurrentRows(t *testing.T) {
 	}
 }
 
+func readInformationResults(t *testing.T, ctx context.Context, rows *sql.Rows, messages *sqlexp.ReturnMessage) ([]tdsdriver.Error, []int64) {
+	t.Helper()
+	var notices []tdsdriver.Error
+	var values []int64
+	active := true
+	for active {
+		switch message := messages.Message(ctx).(type) {
+		case sqlexp.MsgNotice:
+			notice, ok := message.Message.(tdsdriver.Error)
+			if !ok {
+				t.Fatalf("unexpected diagnostic carrier: %T", message.Message)
+			}
+			notices = append(notices, notice)
+		case sqlexp.MsgError:
+			t.Fatalf("information became an error: %v", message.Error)
+		case sqlexp.MsgNext:
+			for rows.Next() {
+				var value int64
+				if err := rows.Scan(&value); err != nil {
+					t.Fatal(err)
+				}
+				values = append(values, value)
+			}
+		case sqlexp.MsgNextResultSet:
+			active = rows.NextResultSet()
+		}
+		if ctx.Err() != nil {
+			t.Fatal(ctx.Err())
+		}
+	}
+	return notices, values
+}
+
 func TestClientInformationMessagesContinueAcrossResults(t *testing.T) {
 	for _, encrypted := range []bool{false, true} {
 		t.Run(fmt.Sprint("encrypted=", encrypted), func(t *testing.T) {
@@ -333,34 +367,7 @@ func TestClientInformationMessagesContinueAcrossResults(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer rows.Close()
-			var notices []tdsdriver.Error
-			var values []int64
-			active := true
-			for active {
-				switch message := messages.Message(ctx).(type) {
-				case sqlexp.MsgNotice:
-					notice, ok := message.Message.(tdsdriver.Error)
-					if !ok {
-						t.Fatalf("unexpected diagnostic carrier: %T", message.Message)
-					}
-					notices = append(notices, notice)
-				case sqlexp.MsgError:
-					t.Fatalf("information became an error: %v", message.Error)
-				case sqlexp.MsgNext:
-					for rows.Next() {
-						var value int64
-						if err := rows.Scan(&value); err != nil {
-							t.Fatal(err)
-						}
-						values = append(values, value)
-					}
-				case sqlexp.MsgNextResultSet:
-					active = rows.NextResultSet()
-				}
-				if ctx.Err() != nil {
-					t.Fatal(ctx.Err())
-				}
-			}
+			notices, values := readInformationResults(t, ctx, rows, messages)
 			if rows.Err() != nil || !reflect.DeepEqual(values, []int64{1, 2}) || len(notices) != 3 {
 				t.Fatal("result stream did not continue", rows.Err(), values, notices)
 			}
@@ -420,5 +427,79 @@ func TestClientInformationHonorsRequestCancellation(t *testing.T) {
 	var next int
 	if err := db.QueryRow("SELECT 1").Scan(&next); err != nil || next != 1 {
 		t.Fatal("cancelled information corrupted later requests", err, next)
+	}
+}
+
+func TestClientPreparedRPCInformationNotices(t *testing.T) {
+	var executions atomic.Int64
+	db, _, _ := startClient(t, false, func(s *Server) {
+		execute := s.Handler.Execute
+		s.Handler.Execute = func(ctx context.Context, session Session, request Request, w ResultWriter) error {
+			if request.Text == "SELECT parameter" {
+				executions.Add(1)
+				if err := w.Message(Diagnostic{Number: 70003, State: 8, Class: 3,
+					Text: "prepared notice 🙂", Server: "node", Procedure: "load", Line: 70002}); err != nil {
+					return err
+				}
+			}
+			return execute(ctx, session, request, w)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var handle int64
+	if _, err := conn.ExecContext(ctx, "sp_prepare", sql.Named("handle", sql.Out{Dest: &handle}),
+		sql.Named("params", "@v bigint"), sql.Named("stmt", "SELECT parameter")); err != nil || handle <= 0 {
+		t.Fatal("native prepare failed", err, handle)
+	}
+	if executions.Load() != 0 {
+		t.Fatal("pure preparation invoked the execution callback")
+	}
+	check := func(rows *sql.Rows, messages *sqlexp.ReturnMessage, value int64) {
+		notices, values := readInformationResults(t, ctx, rows, messages)
+		err := rows.Err()
+		rows.Close()
+		if err != nil || !reflect.DeepEqual(values, []int64{value}) || len(notices) != 1 {
+			t.Fatal("prepared information disrupted its result", err, values, notices)
+		}
+		notice := notices[0]
+		if notice.Number != 70003 || notice.State != 8 || notice.Class != 3 || notice.LineNo != 70002 ||
+			notice.Message != "prepared notice 🙂" || notice.ServerName != "node" || notice.ProcName != "load" {
+			t.Fatalf("prepared RPC changed its information payload: %#v", notice)
+		}
+	}
+
+	for i := int64(0); i < 2; i++ {
+		messages := &sqlexp.ReturnMessage{}
+		value := int64(9007199254740993) + i
+		rows, err := conn.QueryContext(ctx, "sp_execute", sql.Named("handle", handle), sql.Named("v", value), messages)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(rows, messages, value)
+	}
+	var combined int64
+	messages := &sqlexp.ReturnMessage{}
+	rows, err := conn.QueryContext(ctx, "sp_prepexec", sql.Named("handle", sql.Out{Dest: &combined}),
+		sql.Named("params", "@v bigint"), sql.Named("stmt", "SELECT parameter"), sql.Named("v", int64(42)), messages)
+	if err != nil {
+		t.Fatal("combined prepare/execute failed", err)
+	}
+	check(rows, messages, 42)
+	if combined <= 0 || combined == handle {
+		t.Fatal("information disrupted the prepared output handle", combined, handle)
+	}
+	for _, prepared := range []int64{handle, combined} {
+		if _, err := conn.ExecContext(ctx, "sp_unprepare", sql.Named("handle", prepared)); err != nil {
+			t.Fatal("prepared information changed handle lifecycle", err)
+		}
+	}
+	if executions.Load() != 3 {
+		t.Fatal("prepared request execution count", executions.Load())
 	}
 }

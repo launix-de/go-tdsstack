@@ -56,7 +56,8 @@ nor starts/completes a result, and never promotes a diagnostic into an error.
 Applications choose informational classification and message contents. The same
 request context, output serialization and ordinary packet buffering apply.
 Text/name prefixes use UTF-16 units; oversized or invalid fields are rejected
-before any token bytes are written. Messages emitted while opening a cursor go
+before any token bytes are written. Encoding failures remain on the writer, as
+for malformed row payloads. Messages emitted while opening a cursor go
 to that response once and are not retained or replayed by later cursor fetches.
 
 Use `int64`, `float64`, `bool`, `string`, `[]byte`, or `nil` for ordinary wire values.

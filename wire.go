@@ -178,17 +178,17 @@ func tdsDone(b *bytes.Buffer, token byte, status uint16, rows uint64) {
 	tdsU64(b, rows)
 }
 
-// Build a complete bounded INFO token before publishing any bytes. In
+// Build a complete bounded INFO or ERROR token before publishing any bytes. In
 // particular, text/name prefixes count UTF-16 units; token length counts bytes.
-func tdsInfo(d Diagnostic) ([]byte, error) {
+func tdsDiagnostic(kind byte, d Diagnostic) ([]byte, error) {
 	if len(d.Text) > 2*math.MaxUint16 || len(d.Server) > 4*math.MaxUint8 || len(d.Procedure) > 4*math.MaxUint8 ||
 		!utf8.ValidString(d.Text) || !utf8.ValidString(d.Server) || !utf8.ValidString(d.Procedure) {
-		return nil, fmt.Errorf("invalid or oversized information text")
+		return nil, fmt.Errorf("invalid or oversized diagnostic text")
 	}
 	text, server, procedure := tdsUTF16(d.Text), tdsUTF16(d.Server), tdsUTF16(d.Procedure)
 	length := 14 + len(text) + len(server) + len(procedure)
 	if length > math.MaxUint16 || len(server)/2 > math.MaxUint8 || len(procedure)/2 > math.MaxUint8 {
-		return nil, fmt.Errorf("information fields exceed wire length limits")
+		return nil, fmt.Errorf("diagnostic fields exceed wire length limits")
 	}
 	var payload bytes.Buffer
 	payload.Grow(length)
@@ -202,25 +202,21 @@ func tdsInfo(d Diagnostic) ([]byte, error) {
 	payload.Write(procedure)
 	tdsU32(&payload, d.Line)
 	var token bytes.Buffer
-	tdsToken(&token, 0xab, payload.Bytes())
+	tdsToken(&token, kind, payload.Bytes())
 	return token.Bytes(), nil
 }
 
-func tdsError(b *bytes.Buffer, number uint32, message string) {
-	// Bound the protocol message; detailed panics belong in the server log.
+// Ordinary errors retain the historical bounded message and wire defaults.
+// Validate before cutting a UTF-8 prefix so its last rune cannot be split.
+func tdsDefaultDiagnostic(number uint32, message string) Diagnostic {
+	message = strings.ToValidUTF8(message, "\uFFFD")
 	if len(message) > 2048 {
 		message = message[:2048]
+		for !utf8.ValidString(message) {
+			message = message[:len(message)-1]
+		}
 	}
-	var payload bytes.Buffer
-	tdsU32(&payload, number)
-	payload.Write([]byte{1, 16}) // state, severity
-	text := tdsUTF16(message)
-	tdsU16(&payload, uint16(len(text)/2))
-	payload.Write(text)
-	tdsBText(&payload, "TDS")
-	tdsBText(&payload, "")
-	tdsU32(&payload, 1)
-	tdsToken(b, 0xaa, payload.Bytes())
+	return Diagnostic{Number: number, State: 1, Class: 16, Text: message, Server: "TDS", Line: 1}
 }
 
 func tdsDatabase(b *bytes.Buffer, current, previous string) {

@@ -177,7 +177,8 @@ func (s *Server) handshake(ctx context.Context, conn net.Conn) (net.Conn, tdsLog
 	session, authErr := s.Handler.Authenticate(ctx, Login{User: login.user, Password: login.password, Database: login.database, RemoteAddress: conn.RemoteAddr().String(), BrowseMetadata: login.browseMetadata})
 	if authErr != nil {
 		var tokens bytes.Buffer
-		tdsError(&tokens, 18456, "Login failed")
+		token, _ := tdsDiagnostic(0xaa, tdsDefaultDiagnostic(18456, "Login failed"))
+		tokens.Write(token)
 		tdsDone(&tokens, 0xfd, 2, 0)
 		_ = writeTDSMessage(conn, 4, tokens.Bytes())
 		return conn, login, fmt.Errorf("TDS login denied")

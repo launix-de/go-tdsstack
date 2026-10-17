@@ -62,15 +62,31 @@ type Request struct {
 	Cursor                                  bool
 }
 
-// Diagnostic is an explicit INFO-token payload. Text and name lengths use
+// Diagnostic is an explicit INFO/ERROR-token payload. Text and name lengths use
 // UTF-16 units; Line is the TDS 7.4 four-byte line field. No field is inferred,
 // truncated, or normalized, and Class never promotes this payload to an error.
-// Applications decide which diagnostics are informational.
+// ResultWriter.Message emits INFO; DiagnosticError returned by a handler emits
+// ERROR. Applications select the token kind and all diagnostic metadata.
 type Diagnostic struct {
 	Number                  uint32
 	State, Class            byte
 	Text, Server, Procedure string
 	Line                    uint32
+}
+
+// DiagnosticError returns application-supplied ERROR metadata through a handler's
+// request error result. Wrapping with %w preserves the diagnostic; the wrapping
+// text is not added to its wire Text. Invalid payloads fail with a bounded generic
+// error instead of publishing malformed or truncated metadata.
+type DiagnosticError struct {
+	Diagnostic
+}
+
+func (e *DiagnosticError) Error() string {
+	if e == nil {
+		return "nil diagnostic error"
+	}
+	return e.Text
 }
 
 type Completion struct {

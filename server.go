@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -289,14 +290,31 @@ func (c *connection) execute(m tdsMessage, conn net.Conn) (err error) {
 	}()
 	defer func() {
 		if failure := recover(); failure != nil {
-			err = fmt.Errorf("request: %v", failure)
+			if cause, ok := failure.(error); ok {
+				err = fmt.Errorf("request: %w", cause)
+			} else {
+				err = fmt.Errorf("request: %v", failure)
+			}
 		}
 		if err != nil {
 			var b bytes.Buffer
 			if r.finish() {
 				tdsDone(&b, 0xfd, 0x20, 0)
 			} else {
-				tdsError(&b, 50000, err.Error())
+				var diagnostic Diagnostic
+				var applicationError *DiagnosticError
+				if errors.As(err, &applicationError) && applicationError != nil {
+					diagnostic = applicationError.Diagnostic
+				} else {
+					diagnostic = tdsDefaultDiagnostic(50000, err.Error())
+				}
+				token, encodingError := tdsDiagnostic(0xaa, diagnostic)
+				if encodingError != nil {
+					// No bytes have been published. Reject the payload through the
+					// same error completion using a known bounded diagnostic.
+					token, _ = tdsDiagnostic(0xaa, tdsDefaultDiagnostic(50000, encodingError.Error()))
+				}
+				b.Write(token)
 				if rpc {
 					b.WriteByte(0x79)
 					tdsU32(&b, 1)

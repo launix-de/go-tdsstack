@@ -60,6 +60,15 @@ before any token bytes are written. Encoding failures remain on the writer, as
 for malformed row payloads. Messages emitted while opening a cursor go
 to that response once and are not retained or replayed by later cursor fetches.
 
+Returning `&DiagnosticError{Diagnostic: Diagnostic{...}}` from a request handler emits an
+ERROR token with the supplied diagnostic fields. Standard `%w` wrapping preserves
+those fields, including the original text; the transport does not classify errors
+from message contents or severity. The same bounded encoder serves INFO and ERROR.
+Invalid structured payloads produce a generic error completion instead of malformed
+framing. Ordinary errors retain number 50000, state 1, class 16 and bounded text.
+Errors during preparation or initial cursor creation do not publish new handles;
+errors executing an already prepared handle leave its definition available.
+
 Use `int64`, `float64`, `bool`, `string`, `[]byte`, or `nil` for ordinary wire values.
 `Decimal` carries an unscaled canonical integer string; no binary floating point
 conversion occurs. `Temporal` carries day ordinal, wire clock units and original

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"io"
 	"reflect"
 	"testing"
@@ -225,5 +226,104 @@ func TestLoginBounds(t *testing.T) {
 	binary.LittleEndian.PutUint16(data[42:], 1)
 	if _, e := decodeTDSLogin(data); e == nil {
 		t.Fatal("out-of-bounds login accepted")
+	}
+}
+
+// These literal fixtures keep GUID byte order independent of the value encoder.
+func guidWireBytes() []byte {
+	return []byte{0x67, 0x45, 0x23, 0x01, 0xab, 0x89, 0xef, 0xcd, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef}
+}
+
+func TestGUIDResultWireBytesAndValidation(t *testing.T) {
+	column := Column{Name: "g", Flags: 1, WireType: WireType{Kind: 0x24, Size: 16}}
+	var output bytes.Buffer
+	writer := &resultWriter{w: &output}
+	if err := writer.Fields([]Column{column}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Row([]any{guidWireBytes()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Row([]any{nil}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Done(Completion{Rows: 2}); err != nil {
+		t.Fatal(err)
+	}
+	want, err := hex.DecodeString("8101000000000001002410016700d11067452301ab89efcd0123456789abcdefd100fd100000000200000000000000")
+	if err != nil || !bytes.Equal(output.Bytes(), want) {
+		t.Fatalf("GUID metadata, payload, NULL or completion changed: %x, %v", output.Bytes(), err)
+	}
+	for _, size := range []int{0, 1, 15, 17, 255, 65535} {
+		var bad bytes.Buffer
+		writer := &resultWriter{w: &bad}
+		invalid := column
+		invalid.Size = size
+		if err := writer.Fields([]Column{invalid}); err == nil || bad.Len() != 0 {
+			t.Fatalf("invalid GUID descriptor %d published bytes", size)
+		}
+	}
+	for _, value := range []any{[]byte(nil), []byte{}, make([]byte, 15), make([]byte, 17), "01234567-89ab-cdef-0123-456789abcdef", [16]byte{}} {
+		var bad bytes.Buffer
+		writer := &resultWriter{w: &bad}
+		if err := writer.Fields([]Column{column}); err != nil {
+			t.Fatal(err)
+		}
+		before := bad.Len()
+		if err := writer.Row([]any{value}); err == nil || bad.Len() != before {
+			t.Fatalf("invalid GUID payload %T published a partial row", value)
+		}
+	}
+}
+
+func TestGUIDRPCDecodeLengthsAndOwnership(t *testing.T) {
+	for _, value := range [][]byte{nil, make([]byte, 16), guidWireBytes()} {
+		encoded := append([]byte{0x24, 16, byte(len(value))}, value...)
+		decoder := tdsDecoder{data: encoded}
+		got := decoder.parameter()
+		if decoder.err != nil || decoder.descriptor != (WireType{Kind: 0x24, Size: 16}) || len(decoder.data) != 0 {
+			t.Fatalf("GUID decoder: %v, %+v, %x", decoder.err, decoder.descriptor, decoder.data)
+		}
+		if value == nil {
+			if got != nil {
+				t.Fatal("NULL GUID is not nil")
+			}
+		} else {
+			if !bytes.Equal(got.([]byte), value) {
+				t.Fatalf("GUID bytes changed: %x", got)
+			}
+			encoded[3] = 0
+			if !bytes.Equal(got.([]byte), value) {
+				t.Fatal("decoded GUID borrows the packet buffer")
+			}
+		}
+	}
+	for size := 0; size < 256; size++ {
+		if size == 16 {
+			continue
+		}
+		decoder := tdsDecoder{data: []byte{0x24, byte(size), 0}}
+		decoder.parameter()
+		if decoder.err == nil {
+			t.Fatalf("invalid GUID descriptor length %d accepted", size)
+		}
+	}
+	for size := 1; size < 256; size++ {
+		if size == 16 {
+			continue
+		}
+		decoder := tdsDecoder{data: append([]byte{0x24, 16, byte(size)}, make([]byte, size)...)}
+		decoder.parameter()
+		if decoder.err == nil {
+			t.Fatalf("invalid GUID value length %d accepted", size)
+		}
+	}
+	complete := append([]byte{0x24, 16, 16}, guidWireBytes()...)
+	for size := 1; size < len(complete); size++ {
+		decoder := tdsDecoder{data: complete[:size]}
+		decoder.parameter()
+		if decoder.err == nil {
+			t.Fatalf("truncated GUID of %d bytes accepted", size)
+		}
 	}
 }

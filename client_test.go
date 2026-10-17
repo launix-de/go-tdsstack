@@ -292,3 +292,52 @@ func TestResultConcurrentRows(t *testing.T) {
 		t.Fatal(len(seen), rows.Err())
 	}
 }
+
+func TestReleasedClientGUIDResults(t *testing.T) {
+	db, _, _ := startClient(t, false, func(server *Server) {
+		server.Handler.Execute = func(_ context.Context, _ Session, request Request, writer ResultWriter) error {
+			if err := writer.Fields([]Column{fixtureColumn("g", 0x24, 16)}); err != nil {
+				return err
+			}
+			if request.Text == "GUID empty" {
+				return nil
+			}
+			if err := writer.Row([]any{guidWireBytes()}); err != nil {
+				return err
+			}
+			return writer.Row([]any{nil})
+		}
+	})
+	for _, query := range []string{"GUID values", "GUID empty"} {
+		rows, err := db.Query(query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		types, err := rows.ColumnTypes()
+		if err != nil || len(types) != 1 || types[0].DatabaseTypeName() != "UNIQUEIDENTIFIER" {
+			t.Fatalf("GUID descriptor: %v, %v", types, err)
+		}
+		if query == "GUID values" {
+			var identifier tdsdriver.UniqueIdentifier
+			if !rows.Next() {
+				t.Fatalf("missing GUID row: %v", rows.Err())
+			}
+			if err := rows.Scan(&identifier); err != nil || identifier.String() != "01234567-89AB-CDEF-0123-456789ABCDEF" {
+				t.Fatalf("driver GUID scan: %s, %v", identifier.String(), err)
+			}
+			var null any
+			if !rows.Next() {
+				t.Fatalf("missing NULL row: %v", rows.Err())
+			}
+			if err := rows.Scan(&null); err != nil || null != nil {
+				t.Fatalf("driver NULL scan: %v, %v", null, err)
+			}
+		}
+		if rows.Next() || rows.Err() != nil {
+			t.Fatalf("unexpected row or completion error: %v", rows.Err())
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

@@ -10,7 +10,8 @@ import (
 
 // WireType is an explicit protocol descriptor. Size is bytes; Scale and Precision
 // are transmitted unchanged. SQL declarations and implicit conversions belong to
-// the application, including for NULL values.
+// the application, including for NULL values. GUIDTYPE (0x24) uses Size 16
+// and nil or exactly 16 payload bytes; the library preserves their wire order.
 type WireType struct {
 	Kind             byte
 	Size             int

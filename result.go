@@ -61,6 +61,31 @@ type resultWriter struct {
 	err            error
 }
 
+func (r *resultWriter) Message(d Diagnostic) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return r.err
+	}
+	if r.done && !r.more {
+		return fmt.Errorf("result already completed")
+	}
+	if r.ctx != nil {
+		if err := r.ctx.Err(); err != nil {
+			return err
+		}
+	}
+	data, err := tdsDiagnostic(0xab, d)
+	if err != nil {
+		// Like row-payload encoding failures, an invalid diagnostic cannot be
+		// ignored by the handler and later admitted as a successful response.
+		r.err = err
+		return r.err
+	}
+	r.err = tdsWriteAll(r.w, data)
+	return r.err
+}
+
 func (r *resultWriter) Fields(columns []Column) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -11,9 +11,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"database/sql"
+	"errors"
 	"fmt"
+	"github.com/golang-sql/sqlexp"
 	"math/big"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -290,5 +293,132 @@ func TestResultConcurrentRows(t *testing.T) {
 	}
 	if rows.Err() != nil || len(seen) != 400 {
 		t.Fatal(len(seen), rows.Err())
+	}
+}
+
+func TestClientInformationMessagesContinueAcrossResults(t *testing.T) {
+	for _, encrypted := range []bool{false, true} {
+		t.Run(fmt.Sprint("encrypted=", encrypted), func(t *testing.T) {
+			db, _, _ := startClient(t, encrypted, func(s *Server) {
+				execute := s.Handler.Execute
+				s.Handler.Execute = func(ctx context.Context, session Session, request Request, w ResultWriter) error {
+					if request.Text != "opaque diagnostic sequence" {
+						return execute(ctx, session, request, w)
+					}
+					for i, phase := range []string{"before", "between", "after"} {
+						if err := w.Message(Diagnostic{Number: uint32(70001 + i), State: 7, Class: 9,
+							Text: phase + " Grüße 🙂", Server: "node", Procedure: "load", Line: uint32(70000 + i)}); err != nil {
+							return err
+						}
+						if i < 2 {
+							if err := w.Fields([]Column{fixtureColumn("v", 0x26, 8)}); err != nil {
+								return err
+							}
+							if err := w.Row([]any{int64(i + 1)}); err != nil {
+								return err
+							}
+						}
+						if err := w.Done(Completion{Rows: 1, More: i < 2, NoCount: i == 2}); err != nil {
+							return err
+						}
+					}
+					return nil
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			messages := &sqlexp.ReturnMessage{}
+			rows, err := db.QueryContext(ctx, "opaque diagnostic sequence", messages)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			var notices []tdsdriver.Error
+			var values []int64
+			active := true
+			for active {
+				switch message := messages.Message(ctx).(type) {
+				case sqlexp.MsgNotice:
+					notice, ok := message.Message.(tdsdriver.Error)
+					if !ok {
+						t.Fatalf("unexpected diagnostic carrier: %T", message.Message)
+					}
+					notices = append(notices, notice)
+				case sqlexp.MsgError:
+					t.Fatalf("information became an error: %v", message.Error)
+				case sqlexp.MsgNext:
+					for rows.Next() {
+						var value int64
+						if err := rows.Scan(&value); err != nil {
+							t.Fatal(err)
+						}
+						values = append(values, value)
+					}
+				case sqlexp.MsgNextResultSet:
+					active = rows.NextResultSet()
+				}
+				if ctx.Err() != nil {
+					t.Fatal(ctx.Err())
+				}
+			}
+			if rows.Err() != nil || !reflect.DeepEqual(values, []int64{1, 2}) || len(notices) != 3 {
+				t.Fatal("result stream did not continue", rows.Err(), values, notices)
+			}
+			for i, notice := range notices {
+				if notice.Number != int32(70001+i) || notice.State != 7 || notice.Class != 9 || notice.LineNo != int32(70000+i) ||
+					notice.ServerName != "node" || notice.ProcName != "load" || notice.Message != []string{"before", "between", "after"}[i]+" Grüße 🙂" {
+					t.Fatalf("client lost information fields: %#v", notice)
+				}
+			}
+			var next int
+			if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&next); err != nil || next != 1 {
+				t.Fatal("information changed later request state", err, next)
+			}
+		})
+	}
+}
+
+func TestClientInformationHonorsRequestCancellation(t *testing.T) {
+	entered := make(chan struct{})
+	observed := make(chan error, 1)
+	db, _, _ := startClient(t, false, func(s *Server) {
+		execute := s.Handler.Execute
+		s.Handler.Execute = func(ctx context.Context, session Session, request Request, w ResultWriter) error {
+			if request.Text != "opaque cancellable diagnostic" {
+				return execute(ctx, session, request, w)
+			}
+			close(entered)
+			<-ctx.Done()
+			err := w.Message(Diagnostic{Text: "cancelled request must not publish this"})
+			observed <- err
+			return err
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() {
+		_, err := db.ExecContext(ctx, "opaque cancellable diagnostic")
+		finished <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never reached the application")
+	}
+	cancel()
+	for _, result := range []<-chan error{finished, observed} {
+		select {
+		case err := <-result:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatal("cancelled owner was not respected", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("cancellation did not finish")
+		}
+	}
+	var next int
+	if err := db.QueryRow("SELECT 1").Scan(&next); err != nil || next != 1 {
+		t.Fatal("cancelled information corrupted later requests", err, next)
 	}
 }

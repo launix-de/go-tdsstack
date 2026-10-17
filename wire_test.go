@@ -7,8 +7,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
+	"errors"
 	"io"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -225,5 +229,151 @@ func TestLoginBounds(t *testing.T) {
 	binary.LittleEndian.PutUint16(data[42:], 1)
 	if _, e := decodeTDSLogin(data); e == nil {
 		t.Fatal("out-of-bounds login accepted")
+	}
+}
+
+func TestInformationMessageWireContract(t *testing.T) {
+	var b bytes.Buffer
+	w := &resultWriter{w: &b, ctx: context.Background()}
+	message := Diagnostic{Number: 70001, State: 5, Class: 9, Text: "ready", Server: "node", Procedure: "load", Line: 70000}
+	if err := w.Message(message); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := hex.DecodeString("ab2800711101000509050072006500610064007900046e006f0064006500046c006f006100640070110100")
+	if !bytes.Equal(b.Bytes(), want) || w.fields || w.done || w.count != 0 {
+		t.Fatalf("unexpected information token or result state: %x", b.Bytes())
+	}
+	if err := w.Fields([]Column{fixtureColumn("v", 0x26, 8)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Row([]any{int64(1)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Message(message); err != nil || w.count != 1 {
+		t.Fatal("information changed the active result", err, w.count)
+	}
+	if err := w.Done(Completion{Rows: 1, More: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Message(message); err != nil {
+		t.Fatal("information between results", err)
+	}
+	if err := w.Done(Completion{NoCount: true}); err != nil {
+		t.Fatal(err)
+	}
+	before := b.Len()
+	if w.Message(message) == nil || b.Len() != before {
+		t.Fatal("information after final completion changed the response")
+	}
+}
+
+func TestInformationMessageEncodingBounds(t *testing.T) {
+	name := strings.Repeat("🙂", 127) + "x"
+	for _, message := range []Diagnostic{
+		{Text: strings.Repeat("x", 32760)},
+		{Text: strings.Repeat("🙂", 16380)},
+		{Text: strings.Repeat("x", 32250), Server: name, Procedure: name},
+		{Text: "Grüße 🙂", Server: name, Procedure: name},
+	} {
+		var b bytes.Buffer
+		w := &resultWriter{w: &b}
+		if err := w.Message(message); err != nil {
+			t.Fatal(err)
+		}
+		data := b.Bytes()
+		if data[0] != 0xab || int(binary.LittleEndian.Uint16(data[1:3])) != len(data)-3 ||
+			int(binary.LittleEndian.Uint16(data[9:11])) != len(tdsUTF16(message.Text))/2 {
+			t.Fatalf("information lengths do not describe their actual payload: %d", len(data))
+		}
+		at := 11 + len(tdsUTF16(message.Text))
+		for _, name := range []string{message.Server, message.Procedure} {
+			length := int(data[at]) * 2
+			decoded, err := tdsText(data[at+1 : at+1+length])
+			if err != nil || decoded != name {
+				t.Fatalf("information name changed at a UTF-16 boundary: %q / %q / %v", decoded, name, err)
+			}
+			at += 1 + length
+		}
+	}
+	for _, message := range []Diagnostic{
+		{Text: strings.Repeat("x", 32761)},
+		{Text: strings.Repeat("🙂", 16381)},
+		{Text: strings.Repeat("x", 32760), Server: "x"},
+		{Text: strings.Repeat("x", 32251), Server: name, Procedure: name},
+		{Server: strings.Repeat("🙂", 128)},
+		{Server: strings.Repeat("x", 256)},
+		{Procedure: strings.Repeat("x", 256)},
+		{Procedure: strings.Repeat("🙂", 128)},
+		{Text: string([]byte{0xff})},
+		{Server: string([]byte{0xff})},
+		{Procedure: string([]byte{0xff})},
+	} {
+		var b bytes.Buffer
+		w := &resultWriter{w: &b}
+		if w.Message(message) == nil || b.Len() != 0 {
+			t.Fatalf("invalid information published partial framing: %#v", message)
+		}
+		if err := w.Message(Diagnostic{Text: "valid successor"}); err != nil {
+			t.Fatal("rejected payload poisoned an untouched response", err)
+		}
+	}
+}
+
+type shortMessageWriter struct{ bytes.Buffer }
+
+func (w *shortMessageWriter) Write(data []byte) (int, error) {
+	if len(data) > 2 {
+		data = data[:2]
+	}
+	return w.Buffer.Write(data)
+}
+func TestInformationMessageCancellationAndShortWrites(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var b bytes.Buffer
+	w := &resultWriter{w: &b, ctx: ctx}
+	cancel()
+	if err := w.Message(Diagnostic{Text: "cancelled"}); !errors.Is(err, context.Canceled) || b.Len() != 0 {
+		t.Fatal("cancelled request emitted information", err)
+	}
+	short := &shortMessageWriter{}
+	w = &resultWriter{w: short}
+	if err := w.Message(Diagnostic{Text: "short writes"}); err != nil || short.Len() != 41 {
+		t.Fatal("short writes lost information framing", err, short.Len())
+	}
+	w = &resultWriter{w: zeroWriter{}}
+	if !errors.Is(w.Message(Diagnostic{Text: "unwritable"}), io.ErrShortWrite) ||
+		!errors.Is(w.Message(Diagnostic{Text: "successor"}), io.ErrShortWrite) ||
+		!errors.Is(w.Done(Completion{}), io.ErrShortWrite) {
+		t.Fatal("information wire failure was not retained")
+	}
+}
+
+func TestInformationMessagesParallelCallbacks(t *testing.T) {
+	var b bytes.Buffer
+	w := &resultWriter{w: &b}
+	var producers sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		producers.Add(1)
+		go func() {
+			defer producers.Done()
+			if err := w.Message(Diagnostic{Text: "complete message 🙂"}); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	producers.Wait()
+	data := b.Bytes()
+	for i := 0; i < 32; i++ {
+		if len(data) < 3 || data[0] != 0xab {
+			t.Fatal("concurrent messages interleaved their token framing")
+		}
+		length := 3 + int(binary.LittleEndian.Uint16(data[1:3]))
+		if length > len(data) {
+			t.Fatal("incomplete concurrent information token")
+		}
+		data = data[length:]
+	}
+	if len(data) != 0 || w.count != 0 || w.fields || w.done {
+		t.Fatal("information callbacks changed result state or row count")
 	}
 }

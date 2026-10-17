@@ -50,11 +50,24 @@ func (c *connection) removeCursor(handle int32) {
 // snapshotWriter owns native decoded payloads only. Each stored row is cloned
 // and prevalidated; it never retains application codecs or invocation state.
 type snapshotWriter struct {
+	output       *resultWriter
 	columns      []Column
 	rows         [][]any
 	bytes        int
 	fields, done bool
 	ctx          context.Context
+}
+
+// Information belongs to this invocation's response, never the retained
+// cursor snapshot. Fetches replay only cloned fields and rows.
+func (s *snapshotWriter) Message(d Diagnostic) error {
+	if s.done {
+		return fmt.Errorf("cursor result already completed")
+	}
+	if s.output == nil {
+		return fmt.Errorf("cursor information output unavailable")
+	}
+	return s.output.Message(d)
 }
 
 func (s *snapshotWriter) Fields(columns []Column) error {
@@ -116,7 +129,7 @@ func (s *snapshotWriter) Done(c Completion) error {
 	s.done = true
 	return nil
 }
-func (c *connection) openCursor(r tdsRPC, state *requestState) (*cursorSnapshot, int32) {
+func (c *connection) openCursor(r tdsRPC, state *requestState, response *tdsResponse) (*cursorSnapshot, int32) {
 	a := r.arguments
 	if len(a) < 5 || c.server.Handler.Describe == nil {
 		panic("cursor requires pure describe")
@@ -153,9 +166,12 @@ func (c *connection) openCursor(r tdsRPC, state *requestState) (*cursorSnapshot,
 	if _, err := c.server.Handler.Describe(state.ctx, c.session, q); err != nil {
 		panic(err)
 	}
-	sink := &snapshotWriter{ctx: state.ctx}
+	sink := &snapshotWriter{ctx: state.ctx, output: &resultWriter{ctx: state.ctx, w: response}}
 	if err := c.server.Handler.Execute(state.ctx, c.session, q, sink); err != nil {
 		panic(err)
+	}
+	if sink.output.err != nil {
+		panic(sink.output.err)
 	}
 	if err := state.ctx.Err(); err != nil {
 		panic(err)
@@ -238,7 +254,7 @@ func (c *connection) cursorRPC(rpc tdsRPC, request *requestState, response *tdsR
 	position, fetched := 0, 0
 	switch rpc.procedure {
 	case 2:
-		cursor, handle := c.openCursor(rpc, request)
+		cursor, handle := c.openCursor(rpc, request, response)
 		if c.cursors == nil {
 			c.cursors = make(map[int32]*cursorSnapshot)
 		}

@@ -178,6 +178,34 @@ func tdsDone(b *bytes.Buffer, token byte, status uint16, rows uint64) {
 	tdsU64(b, rows)
 }
 
+// Build a complete bounded INFO token before publishing any bytes. In
+// particular, text/name prefixes count UTF-16 units; token length counts bytes.
+func tdsInfo(d Diagnostic) ([]byte, error) {
+	if len(d.Text) > 2*math.MaxUint16 || len(d.Server) > 4*math.MaxUint8 || len(d.Procedure) > 4*math.MaxUint8 ||
+		!utf8.ValidString(d.Text) || !utf8.ValidString(d.Server) || !utf8.ValidString(d.Procedure) {
+		return nil, fmt.Errorf("invalid or oversized information text")
+	}
+	text, server, procedure := tdsUTF16(d.Text), tdsUTF16(d.Server), tdsUTF16(d.Procedure)
+	length := 14 + len(text) + len(server) + len(procedure)
+	if length > math.MaxUint16 || len(server)/2 > math.MaxUint8 || len(procedure)/2 > math.MaxUint8 {
+		return nil, fmt.Errorf("information fields exceed wire length limits")
+	}
+	var payload bytes.Buffer
+	payload.Grow(length)
+	tdsU32(&payload, d.Number)
+	payload.Write([]byte{d.State, d.Class})
+	tdsU16(&payload, uint16(len(text)/2))
+	payload.Write(text)
+	payload.WriteByte(byte(len(server) / 2))
+	payload.Write(server)
+	payload.WriteByte(byte(len(procedure) / 2))
+	payload.Write(procedure)
+	tdsU32(&payload, d.Line)
+	var token bytes.Buffer
+	tdsToken(&token, 0xab, payload.Bytes())
+	return token.Bytes(), nil
+}
+
 func tdsError(b *bytes.Buffer, number uint32, message string) {
 	// Bound the protocol message; detailed panics belong in the server log.
 	if len(message) > 2048 {

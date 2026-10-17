@@ -333,3 +333,51 @@ func (failedConnection) RemoteAddr() net.Addr             { return &net.TCPAddr{
 func (failedConnection) SetDeadline(time.Time) error      { return nil }
 func (failedConnection) SetReadDeadline(time.Time) error  { return nil }
 func (failedConnection) SetWriteDeadline(time.Time) error { return nil }
+
+func TestCursorInformationIsNotRetainedForFetch(t *testing.T) {
+	_, dsn, _ := startClient(t, false, func(s *Server) {
+		execute := s.Handler.Execute
+		s.Handler.Execute = func(ctx context.Context, session Session, request Request, w ResultWriter) error {
+			if request.Cursor {
+				if err := w.Message(Diagnostic{Text: "cursor construction notice"}); err != nil {
+					return err
+				}
+			}
+			return execute(ctx, session, request, w)
+		}
+	})
+	c := rawClient(t, dsn)
+	data := exchange(t, c, 2, intParam("cursor", 0, true), textParam("SELECT many"),
+		intParam("scroll", 8, true), intParam("concurrency", 1, true), intParam("count", 0, true))
+	handle, ok := returnInt(data, "cursor", 0)
+	if !ok || handle <= 0 || data[0] != 0xab || bytes.Count(data, tdsUTF16("cursor construction notice")) != 1 {
+		t.Fatalf("cursor construction did not forward one information token: %x", data)
+	}
+	for i := 0; i < 2; i++ {
+		data = exchange(t, c, 7, intParam("", int64(handle), false), intParam("", 2, false), intParam("", 0, false), intParam("", 1, false))
+		if bytes.Contains(data, tdsUTF16("cursor construction notice")) || !bytes.Contains(data, rowIntPattern(int64(i), true)) {
+			t.Fatal("fetch replayed an invocation message or lost its row")
+		}
+	}
+	exchange(t, c, 9, intParam("", int64(handle), false))
+}
+
+func TestCursorInformationWireFailureDoesNotPublishHandle(t *testing.T) {
+	var messageError error
+	s := &Server{Handler: Handler{
+		Describe: func(context.Context, Session, Request) ([]Column, error) { return nil, nil },
+		Execute: func(_ context.Context, _ Session, _ Request, w ResultWriter) error {
+			messageError = w.Message(Diagnostic{Text: strings.Repeat("n", 3000)})
+			if err := w.Fields([]Column{fixtureColumn("v", 0x26, 8)}); err != nil {
+				return err
+			}
+			return w.Row([]any{int64(1)})
+		},
+	}}
+	c := &connection{ctx: context.Background(), server: s, database: "fixture"}
+	err := c.execute(tdsMessage{kind: 3, data: encodeRPC(2, intParam("cursor", 0, true), textParam("opaque cursor"),
+		intParam("scroll", 8, true), intParam("concurrency", 1, true), intParam("count", 0, true))}, failedConnection{})
+	if messageError == nil || err == nil || c.nextCursor != 0 || len(c.cursors) != 0 || c.cursorBytes != 0 {
+		t.Fatal("failed information delivery admitted a cursor", messageError, err, c.nextCursor, c.cursorBytes)
+	}
+}

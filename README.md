@@ -49,6 +49,16 @@ changes, transaction state and further results. A handler with one result can om
 are serialized only at this output boundary. Each row is completely validated
 before publishing its ROW token, so malformed payloads cannot swallow an error token.
 
+`Message(Diagnostic)` emits an INFO token before fields, between rows or result
+sets, or before the final completion. The explicit number, state, class, text,
+server, procedure and line fields are preserved. It neither changes row counts
+nor starts/completes a result, and never promotes a diagnostic into an error.
+Applications choose informational classification and message contents. The same
+request context, output serialization and ordinary packet buffering apply.
+Text/name prefixes use UTF-16 units; oversized or invalid fields are rejected
+before any token bytes are written. Messages emitted while opening a cursor go
+to that response once and are not retained or replayed by later cursor fetches.
+
 Use `int64`, `float64`, `bool`, `string`, `[]byte`, or `nil` for ordinary wire values.
 `Decimal` carries an unscaled canonical integer string; no binary floating point
 conversion occurs. `Temporal` carries day ordinal, wire clock units and original
@@ -77,3 +87,5 @@ Tests include released client TCP/TLS/login/typed-result interoperability, exact
 38-digit coefficient and 100ns/offset goldens, typed NULL, malformed packets,
 prepared lifecycle and pure describe, static cursor fetch positions and snapshots,
 transaction successors, attention/reuse, concurrent rows and failed publication.
+Information diagnostics are checked through raw token boundaries and real client
+notices across result sets, cancellation, cursor fetches and short writes.

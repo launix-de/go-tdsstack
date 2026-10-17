@@ -61,6 +61,18 @@ type Request struct {
 	Parameters                              []Parameter
 	Cursor                                  bool
 }
+
+// Diagnostic is an explicit INFO-token payload. Text and name lengths use
+// UTF-16 units; Line is the TDS 7.4 four-byte line field. No field is inferred,
+// truncated, or normalized, and Class never promotes this payload to an error.
+// Applications decide which diagnostics are informational.
+type Diagnostic struct {
+	Number                  uint32
+	State, Class            byte
+	Text, Server, Procedure string
+	Line                    uint32
+}
+
 type Completion struct {
 	Rows          uint64
 	NoCount, More bool
@@ -95,6 +107,9 @@ type TransactionRequest struct {
 // callbacks. Fields must precede rows; Done ends one result. Methods return wire
 // errors and never synthesize descriptors or perform SQL conversion.
 type ResultWriter interface {
+	// Message emits an INFO token without opening or completing a result. It
+	// is valid before fields, between rows/results, and before final Done.
+	Message(Diagnostic) error
 	Fields([]Column) error
 	Row([]any) error
 	Done(Completion) error

@@ -520,3 +520,80 @@ func TestStructuredErrorFailedPublicationDropsHandle(t *testing.T) {
 		t.Fatal("failed error publication retained prepared handle", err, len(c.prepared), c.preparedBytes)
 	}
 }
+
+func TestGUIDRPCPreparedFreshBindingsAndMalformedRecovery(t *testing.T) {
+	var executions, descriptions atomic.Int64
+	_, dsn, _ := startClient(t, false, func(server *Server) {
+		server.Handler.Describe = func(_ context.Context, _ Session, request Request) ([]Column, error) {
+			descriptions.Add(1)
+			if request.Text != "GUID echo" || request.Declarations != "@g uniqueidentifier" {
+				return nil, fmt.Errorf("unexpected prepare contract")
+			}
+			return []Column{fixtureColumn("g", 0x24, 16)}, nil
+		}
+		server.Handler.Execute = func(_ context.Context, _ Session, request Request, writer ResultWriter) error {
+			executions.Add(1)
+			if request.Text != "GUID echo" || request.Declarations != "@g uniqueidentifier" || len(request.Parameters) != 1 {
+				return fmt.Errorf("unexpected execute contract")
+			}
+			parameter := request.Parameters[0]
+			if parameter.Name != "@g" || parameter.Flags != 0 || parameter.Type != (WireType{Kind: 0x24, Size: 16}) {
+				return fmt.Errorf("GUID parameter descriptor lost: %+v", parameter)
+			}
+			if err := writer.Fields([]Column{fixtureColumn("g", 0x24, 16)}); err != nil {
+				return err
+			}
+			return writer.Row([]any{parameter.Value})
+		}
+	})
+	client := rawClient(t, dsn)
+	// Send literal GUIDTYPE metadata and bytes: the released driver's byte Valuer
+	// uses a binary descriptor and therefore cannot prove this input contract.
+	send := func(prefix, guid []byte) []byte {
+		t.Helper()
+		var request bytes.Buffer
+		request.Write(prefix)
+		tdsBText(&request, "@g")
+		request.WriteByte(0)
+		request.Write(guid)
+		if err := writeTDSMessage(client, 3, request.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+		response, err := readTDSMessage(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response.data
+	}
+	assertRow := func(data, value []byte) {
+		t.Helper()
+		pattern := append([]byte{0xd1, byte(len(value))}, value...)
+		if len(data) < 13 || data[0] != 0x81 || !bytes.Contains(data, pattern) || data[len(data)-13] != 0xfe || binary.LittleEndian.Uint16(data[len(data)-12:]) != 0 {
+			t.Fatalf("GUID result or success completion missing: %x", data)
+		}
+	}
+	direct := encodeRPC(10, textParam("GUID echo"), textParam("@g uniqueidentifier"))
+	assertRow(send(direct, append([]byte{0x24, 16, 16}, guidWireBytes()...)), guidWireBytes())
+	data := exchange(t, client, 11, intParam("handle", 0, true), textParam("@g uniqueidentifier"), textParam("GUID echo"), intParam("", 1, false))
+	handle, ok := returnInt(data, "handle", 0)
+	if !ok || handle <= 0 || descriptions.Load() != 1 || executions.Load() != 1 || data[0] != 0x81 {
+		t.Fatalf("pure GUID describe/prepare: %x, %d, %d", data, executions.Load(), descriptions.Load())
+	}
+	prepared := encodeRPC(12, intParam("", int64(handle), false))
+	for _, value := range [][]byte{guidWireBytes(), nil, bytes.Repeat([]byte{0xfe}, 16)} {
+		assertRow(send(prepared, append([]byte{0x24, 16, byte(len(value))}, value...)), value)
+	}
+	before := executions.Load()
+	for _, malformed := range [][]byte{{0x24}, {0x24, 16}, {0x24, 15, 0}, {0x24, 17, 0}, {0x24, 16, 1, 0}, {0x24, 16, 17}, {0x24, 16, 16, 1, 2}} {
+		data := send(prepared, malformed)
+		if len(data) < 18 || data[0] != 0xaa || data[len(data)-18] != 0x79 || binary.LittleEndian.Uint32(data[len(data)-17:]) != 1 || data[len(data)-13] != 0xfe || binary.LittleEndian.Uint16(data[len(data)-12:]) != 2 || executions.Load() != before {
+			t.Fatalf("malformed GUID reached backend or broke error framing: %x", data)
+		}
+	}
+	// A failed binding must leave the prepared handle and connection reusable.
+	assertRow(send(prepared, append([]byte{0x24, 16, 16}, guidWireBytes()...)), guidWireBytes())
+	exchange(t, client, 15, intParam("", int64(handle), false))
+	if executions.Load() != before+1 || descriptions.Load() != 1 {
+		t.Fatal("prepared binding retained values or repeated describe")
+	}
+}

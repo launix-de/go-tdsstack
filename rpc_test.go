@@ -597,3 +597,104 @@ func TestGUIDRPCPreparedFreshBindingsAndMalformedRecovery(t *testing.T) {
 		t.Fatal("prepared binding retained values or repeated describe")
 	}
 }
+
+func TestPreparedGUIDInformationAndStructuredErrorReuse(t *testing.T) {
+	column := Column{Name: "g", Flags: 1, WireType: WireType{Kind: 0x24, Size: 16}}
+	notice := Diagnostic{Number: 70004, State: 5, Class: 9, Text: "combined notice 🙂", Server: "node", Procedure: "load", Line: 70002}
+	afterRow := notice
+	afterRow.Text = "row complete"
+	failure := Diagnostic{Number: 53001, State: 7, Class: 16, Text: "application failure Grüße", Server: "node", Procedure: "load", Line: 70003}
+	errorValue := bytes.Repeat([]byte{0xee}, 16)
+	var executions, descriptions atomic.Int64
+	_, dsn, _ := startClient(t, false, func(server *Server) {
+		server.Handler.Describe = func(_ context.Context, _ Session, request Request) ([]Column, error) {
+			descriptions.Add(1)
+			if request.Text != "opaque combined request" || request.Declarations != "@g uniqueidentifier" {
+				return nil, fmt.Errorf("unexpected prepare contract")
+			}
+			return []Column{column}, nil
+		}
+		server.Handler.Execute = func(_ context.Context, _ Session, request Request, writer ResultWriter) error {
+			executions.Add(1)
+			if request.Text != "opaque combined request" || request.Declarations != "@g uniqueidentifier" || len(request.Parameters) != 1 {
+				return fmt.Errorf("unexpected execution contract")
+			}
+			parameter := request.Parameters[0]
+			if parameter.Name != "@g" || parameter.Flags != 0 || parameter.Type != column.WireType {
+				return fmt.Errorf("prepared descriptor changed: %+v", parameter)
+			}
+			if err := writer.Message(notice); err != nil {
+				return err
+			}
+			if value, ok := parameter.Value.([]byte); ok && bytes.Equal(value, errorValue) {
+				return fmt.Errorf("request context: %w", &DiagnosticError{Diagnostic: failure})
+			}
+			if err := writer.Fields([]Column{column}); err != nil {
+				return err
+			}
+			if err := writer.Row([]any{parameter.Value}); err != nil {
+				return err
+			}
+			return writer.Message(afterRow)
+		}
+	})
+	client := rawClient(t, dsn)
+	data := exchange(t, client, 11, intParam("handle", 0, true), textParam("@g uniqueidentifier"), textParam("opaque combined request"), intParam("", 1, false))
+	handle, ok := returnInt(data, "handle", 0)
+	if !ok || handle <= 0 || descriptions.Load() != 1 || executions.Load() != 0 {
+		t.Fatalf("pure preparation changed ownership: %x, %d, %d", data, descriptions.Load(), executions.Load())
+	}
+	prepared := encodeRPC(12, intParam("", int64(handle), false))
+	infoToken, err := tdsDiagnostic(0xab, notice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterToken, err := tdsDiagnostic(0xab, afterRow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	errorToken, err := tdsDiagnostic(0xaa, failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, value := range [][]byte{guidWireBytes(), nil, errorValue, bytes.Repeat([]byte{0xfe}, 16)} {
+		var request bytes.Buffer
+		request.Write(prepared)
+		tdsBText(&request, "@g")
+		request.Write([]byte{0, 0x24, 16, byte(len(value))})
+		request.Write(value)
+		if err := writeTDSMessage(client, 3, request.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+		response, err := readTDSMessage(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var want bytes.Buffer
+		want.Write(infoToken)
+		if i == 2 {
+			want.Write(errorToken)
+			want.Write([]byte{0x79, 1, 0, 0, 0})
+			tdsDone(&want, 0xfe, 2, 0)
+		} else {
+			// Literal GUID metadata and row framing are independent of the value encoder.
+			want.Write([]byte{0x81, 1, 0, 0, 0, 0, 0, 1, 0, 0x24, 16, 1, 'g', 0, 0xd1, byte(len(value))})
+			want.Write(value)
+			want.Write(afterToken)
+			tdsDone(&want, 0xff, 0x11, 1)
+			want.Write([]byte{0x79, 0, 0, 0, 0})
+			tdsDone(&want, 0xfe, 0, 0)
+		}
+		if !bytes.Equal(response.data, want.Bytes()) {
+			t.Fatalf("execution %d changed combined response: got %x, want %x", i, response.data, want.Bytes())
+		}
+		if descriptions.Load() != 1 || executions.Load() != int64(i+1) {
+			t.Fatal("prepared handle repeated describe or execution", descriptions.Load(), executions.Load())
+		}
+	}
+	exchange(t, client, 15, intParam("", int64(handle), false))
+	data = exchange(t, client, 12, intParam("", int64(handle), false))
+	if !bytes.Contains(data, tdsUTF16("unknown prepared handle")) || executions.Load() != 4 || descriptions.Load() != 1 {
+		t.Fatal("final unprepare did not retire exactly the reused handle")
+	}
+}

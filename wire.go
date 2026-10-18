@@ -178,21 +178,45 @@ func tdsDone(b *bytes.Buffer, token byte, status uint16, rows uint64) {
 	tdsU64(b, rows)
 }
 
-func tdsError(b *bytes.Buffer, number uint32, message string) {
-	// Bound the protocol message; detailed panics belong in the server log.
-	if len(message) > 2048 {
-		message = message[:2048]
+// Build a complete bounded INFO or ERROR token before publishing any bytes. In
+// particular, text/name prefixes count UTF-16 units; token length counts bytes.
+func tdsDiagnostic(kind byte, d Diagnostic) ([]byte, error) {
+	if len(d.Text) > 2*math.MaxUint16 || len(d.Server) > 4*math.MaxUint8 || len(d.Procedure) > 4*math.MaxUint8 ||
+		!utf8.ValidString(d.Text) || !utf8.ValidString(d.Server) || !utf8.ValidString(d.Procedure) {
+		return nil, fmt.Errorf("invalid or oversized diagnostic text")
+	}
+	text, server, procedure := tdsUTF16(d.Text), tdsUTF16(d.Server), tdsUTF16(d.Procedure)
+	length := 14 + len(text) + len(server) + len(procedure)
+	if length > math.MaxUint16 || len(server)/2 > math.MaxUint8 || len(procedure)/2 > math.MaxUint8 {
+		return nil, fmt.Errorf("diagnostic fields exceed wire length limits")
 	}
 	var payload bytes.Buffer
-	tdsU32(&payload, number)
-	payload.Write([]byte{1, 16}) // state, severity
-	text := tdsUTF16(message)
+	payload.Grow(length)
+	tdsU32(&payload, d.Number)
+	payload.Write([]byte{d.State, d.Class})
 	tdsU16(&payload, uint16(len(text)/2))
 	payload.Write(text)
-	tdsBText(&payload, "TDS")
-	tdsBText(&payload, "")
-	tdsU32(&payload, 1)
-	tdsToken(b, 0xaa, payload.Bytes())
+	payload.WriteByte(byte(len(server) / 2))
+	payload.Write(server)
+	payload.WriteByte(byte(len(procedure) / 2))
+	payload.Write(procedure)
+	tdsU32(&payload, d.Line)
+	var token bytes.Buffer
+	tdsToken(&token, kind, payload.Bytes())
+	return token.Bytes(), nil
+}
+
+// Ordinary errors retain the historical bounded message and wire defaults.
+// Validate before cutting a UTF-8 prefix so its last rune cannot be split.
+func tdsDefaultDiagnostic(number uint32, message string) Diagnostic {
+	message = strings.ToValidUTF8(message, "\uFFFD")
+	if len(message) > 2048 {
+		message = message[:2048]
+		for !utf8.ValidString(message) {
+			message = message[:len(message)-1]
+		}
+	}
+	return Diagnostic{Number: number, State: 1, Class: 16, Text: message, Server: "TDS", Line: 1}
 }
 
 func tdsDatabase(b *bytes.Buffer, current, previous string) {
@@ -316,6 +340,22 @@ func (d *tdsDecoder) parameter() any {
 	kind := d.u8()
 	d.descriptor = WireType{Kind: kind}
 	switch kind {
+	case 0x24: // GUIDTYPE: payload byte order is owned by the application.
+		maxSize := d.u8()
+		d.descriptor.Size = int(maxSize)
+		n := d.u8()
+		if maxSize != 16 || n != 0 && n != 16 {
+			d.err = fmt.Errorf("invalid TDS GUID length")
+			return nil
+		}
+		if n == 0 {
+			return nil
+		}
+		value := d.take(16)
+		if d.err != nil {
+			return nil
+		}
+		return append([]byte(nil), value...)
 	case 0x23, 0x63, 0x22: // legacy TEXT, NTEXT and IMAGE input parameters
 		maxSize := d.u32()
 		d.descriptor.Size = int(maxSize)

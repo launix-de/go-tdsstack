@@ -28,6 +28,8 @@ func catchWire(fn func()) (err error) {
 }
 func validType(t WireType) bool {
 	switch t.Kind {
+	case 0x24:
+		return t.Size == 16
 	case 0x26:
 		return t.Size == 1 || t.Size == 2 || t.Size == 4 || t.Size == 8
 	case 0x68:
@@ -59,6 +61,31 @@ type resultWriter struct {
 	rpc            bool
 	completion     func(Completion) error
 	err            error
+}
+
+func (r *resultWriter) Message(d Diagnostic) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return r.err
+	}
+	if r.done && !r.more {
+		return fmt.Errorf("result already completed")
+	}
+	if r.ctx != nil {
+		if err := r.ctx.Err(); err != nil {
+			return err
+		}
+	}
+	data, err := tdsDiagnostic(0xab, d)
+	if err != nil {
+		// Like row-payload encoding failures, an invalid diagnostic cannot be
+		// ignored by the handler and later admitted as a successful response.
+		r.err = err
+		return r.err
+	}
+	r.err = tdsWriteAll(r.w, data)
+	return r.err
 }
 
 func (r *resultWriter) Fields(columns []Column) error {
@@ -104,7 +131,7 @@ func (r *resultWriter) publish() {
 		tdsU16(&metadata, col.Flags)
 		metadata.WriteByte(col.Kind)
 		switch col.Kind {
-		case 0x26, 0x6d:
+		case 0x24, 0x26, 0x6d:
 			size := col.Size
 			metadata.WriteByte(byte(size))
 		case 0x68:
@@ -196,6 +223,16 @@ func encodeWireValue(col Column, value any) []byte {
 	}
 	var b bytes.Buffer
 	switch kind {
+	case 0x24:
+		if value == nil {
+			return []byte{0}
+		}
+		data, ok := value.([]byte)
+		if !ok || len(data) != 16 {
+			panic("GUID wire value requires exactly 16 bytes")
+		}
+		b.WriteByte(16)
+		b.Write(data)
 	case 0x26, 0x68, 0x6d:
 		if value == nil {
 			return []byte{0}

@@ -10,7 +10,8 @@ import (
 
 // WireType is an explicit protocol descriptor. Size is bytes; Scale and Precision
 // are transmitted unchanged. SQL declarations and implicit conversions belong to
-// the application, including for NULL values.
+// the application, including for NULL values. GUIDTYPE (0x24) uses Size 16
+// and nil or exactly 16 payload bytes; the library preserves their wire order.
 type WireType struct {
 	Kind             byte
 	Size             int
@@ -61,6 +62,34 @@ type Request struct {
 	Parameters                              []Parameter
 	Cursor                                  bool
 }
+
+// Diagnostic is an explicit INFO/ERROR-token payload. Text and name lengths use
+// UTF-16 units; Line is the TDS 7.4 four-byte line field. No field is inferred,
+// truncated, or normalized, and Class never promotes this payload to an error.
+// ResultWriter.Message emits INFO; DiagnosticError returned by a handler emits
+// ERROR. Applications select the token kind and all diagnostic metadata.
+type Diagnostic struct {
+	Number                  uint32
+	State, Class            byte
+	Text, Server, Procedure string
+	Line                    uint32
+}
+
+// DiagnosticError returns application-supplied ERROR metadata through a handler's
+// request error result. Wrapping with %w preserves the diagnostic; the wrapping
+// text is not added to its wire Text. Invalid payloads fail with a bounded generic
+// error instead of publishing malformed or truncated metadata.
+type DiagnosticError struct {
+	Diagnostic
+}
+
+func (e *DiagnosticError) Error() string {
+	if e == nil {
+		return "nil diagnostic error"
+	}
+	return e.Text
+}
+
 type Completion struct {
 	Rows          uint64
 	NoCount, More bool
@@ -91,10 +120,13 @@ type TransactionRequest struct {
 	SuccessorIsolation byte
 }
 
-// ResultWriter permits sequential result sets and serializes parallel row
+// ResultWriter permits sequential result sets and serializes parallel output
 // callbacks. Fields must precede rows; Done ends one result. Methods return wire
 // errors and never synthesize descriptors or perform SQL conversion.
 type ResultWriter interface {
+	// Message emits an INFO token without opening or completing a result. It
+	// is valid before fields, between rows/results, and before final Done.
+	Message(Diagnostic) error
 	Fields([]Column) error
 	Row([]any) error
 	Done(Completion) error

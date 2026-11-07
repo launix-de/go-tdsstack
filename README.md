@@ -36,6 +36,12 @@ finish all parallel row producers before returning. Cancellation covers the whol
 request, including `Describe`. Pure `Describe` validates prepared or cursor shapes
 without executing a statement. The library never constructs SQL transaction text.
 
+`Server.Collation` optionally supplies the five-byte default session collation
+announced by ENVCHANGE type 7 during successful login. The transport does not
+choose an SQL collation or infer it from result rows; the all-zero default omits
+the announcement for compatibility. Clients need this default when encoding ANSI
+or SQL_VARIANT RPC parameters before any result metadata has been received.
+
 `Metadata` handles named procedure requests in the frontend. `Transaction` receives
 explicit wire actions. A requested transaction successor invokes the completion
 callback first and invokes begin only if completion succeeds. `BeginRequest` is an

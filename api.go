@@ -123,6 +123,9 @@ type Handler struct {
 	Close        func(Session)
 }
 type Server struct {
+	// Collation is an application-selected session default announced at login.
+	// The all-zero value preserves the legacy behavior of no announcement.
+	Collation [5]byte
 	Handler   Handler
 	Database  string
 	TLSConfig *tls.Config

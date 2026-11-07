@@ -189,6 +189,13 @@ func (s *Server) handshake(ctx context.Context, conn net.Conn) (net.Conn, tdsLog
 	ack.Write([]byte{16, 0, 0, 1})
 	tdsToken(&tokens, 0xad, ack.Bytes())
 	tdsDatabase(&tokens, login.database, "")
+	if s.Collation != [5]byte{} {
+		var collationEnv bytes.Buffer
+		collationEnv.Write([]byte{7, 5}) // SQL Collation, five-byte new value
+		collationEnv.Write(s.Collation[:])
+		collationEnv.WriteByte(0) // no previous session default
+		tdsToken(&tokens, 0xe3, collationEnv.Bytes())
+	}
 	var packetEnv bytes.Buffer
 	packetEnv.WriteByte(4)
 	tdsBText(&packetEnv, "4096")

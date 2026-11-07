@@ -19,7 +19,7 @@ type WireType struct {
 }
 
 // Parameter owns its decoded data. Value is nil, int64, float64, bool, string,
-// []byte, Decimal, or Temporal; it is never an application/runtime value.
+// []byte, Decimal, Temporal, or Variant; it is never an application/runtime value.
 type Parameter struct {
 	Name  string
 	Flags byte
@@ -33,6 +33,16 @@ type Decimal struct{ Coefficient string }
 // Temporal carries the protocol's day ordinal, clock units and offset minutes.
 // The descriptor selects the epoch and clock scale; no calendar casts occur here.
 type Temporal struct{ Days, Ticks, Offset int64 }
+
+// Variant carries one non-NULL scalar and its explicit base descriptor. Use the
+// same descriptors as ordinary values (for example INTN with Size 4 for INT).
+// Its enclosing column/parameter uses Kind 0x62 and Size at most 8016. A SQL
+// NULL is represented by nil, never by a Variant whose Value is nil.
+// Nested variants, MAX/LOB, GUID and unrecognized base types are unsupported.
+type Variant struct {
+	Type  WireType
+	Value any
+}
 
 // Column flags/UserType are supplied by the application, not inferred from rows.
 type Column struct {

@@ -316,6 +316,8 @@ func (d *tdsDecoder) parameter() any {
 	kind := d.u8()
 	d.descriptor = WireType{Kind: kind}
 	switch kind {
+	case 0x62:
+		return d.variant()
 	case 0x23, 0x63, 0x22: // legacy TEXT, NTEXT and IMAGE input parameters
 		maxSize := d.u32()
 		d.descriptor.Size = int(maxSize)

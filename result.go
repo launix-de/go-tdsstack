@@ -28,6 +28,8 @@ func catchWire(fn func()) (err error) {
 }
 func validType(t WireType) bool {
 	switch t.Kind {
+	case 0x62:
+		return t.Size > 0 && t.Size <= 8016
 	case 0x26:
 		return t.Size == 1 || t.Size == 2 || t.Size == 4 || t.Size == 8
 	case 0x68:
@@ -104,6 +106,8 @@ func (r *resultWriter) publish() {
 		tdsU16(&metadata, col.Flags)
 		metadata.WriteByte(col.Kind)
 		switch col.Kind {
+		case 0x62:
+			tdsU32(&metadata, uint32(col.Size))
 		case 0x26, 0x6d:
 			size := col.Size
 			metadata.WriteByte(byte(size))
@@ -188,6 +192,9 @@ func (r *resultWriter) publish() {
 }
 func encodeWireValue(col Column, value any) []byte {
 	kind := col.Kind
+	if kind == 0x62 {
+		return tdsEncodeVariant(col, value)
+	}
 	if kind == 0x6a || kind == 0x6c || kind == 0x6e {
 		return tdsEncodeNumeric(col, value)
 	}

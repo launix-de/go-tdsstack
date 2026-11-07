@@ -87,16 +87,7 @@ func (s *snapshotWriter) Row(row []any) error {
 		for i, v := range row {
 			encoded := encodeWireValue(s.columns[i], v)
 			size += len(encoded)
-			switch x := v.(type) {
-			case []byte:
-				clone[i] = append([]byte(nil), x...)
-			case string:
-				clone[i] = strings.Clone(x)
-			case Decimal:
-				clone[i] = Decimal{strings.Clone(x.Coefficient)}
-			default:
-				clone[i] = v
-			}
+			clone[i] = cloneWireValue(v)
 		}
 	})
 	if err != nil {
@@ -109,6 +100,24 @@ func (s *snapshotWriter) Row(row []any) error {
 	s.rows = append(s.rows, clone)
 	return nil
 }
+
+// Clone only validated native payloads; Variant has one scalar, never recursion
+// into application-owned graphs or nested variants.
+func cloneWireValue(value any) any {
+	switch x := value.(type) {
+	case []byte:
+		return append([]byte(nil), x...)
+	case string:
+		return strings.Clone(x)
+	case Decimal:
+		return Decimal{strings.Clone(x.Coefficient)}
+	case Variant:
+		return Variant{Type: x.Type, Value: cloneWireValue(x.Value)}
+	default:
+		return value
+	}
+}
+
 func (s *snapshotWriter) Done(c Completion) error {
 	if c.More || s.done {
 		return fmt.Errorf("cursor requires one result set")

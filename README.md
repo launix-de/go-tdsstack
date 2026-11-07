@@ -55,6 +55,16 @@ conversion occurs. `Temporal` carries day ordinal, wire clock units and original
 offset minutes. These are transient protocol payloads, not persistent SQL types.
 The application performs scale, precision, calendar and implicit-cast semantics.
 
+`Variant{Type: ..., Value: ...}` supplies explicit per-value base metadata for
+SQL_VARIANT (column/parameter kind `0x62`, maximum size 8016 bytes). Its base
+`Type` uses the ordinary nullable descriptors; the codec translates them to the
+fixed base tokens specified by MS-TDS 2.2.5.5.4. NULL is an outer `nil`, not a
+Variant wrapping nil. Supported bases are integer, bit, float, money, decimal,
+date/time and bounded character/binary types. Decimal variant magnitudes always
+occupy 16 bytes while retaining their declared precision and scale. Nested
+variants, GUID, MAX/LOB and unrecognized bases fail explicitly. RPC decoding
+retains the base descriptor; cursor snapshots clone the owned scalar payload.
+
 Prepared handles retain only opaque text and declarations. Cursor snapshots retain
 only bounded, cloned native payloads. Neither retains a query context, transaction,
 application session, callback closure, planner or storage object. Newly created

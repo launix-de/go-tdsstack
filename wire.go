@@ -517,7 +517,12 @@ func decodeTDSRPC(data []byte) (tdsRPC, error) {
 		}
 	}
 	request.options = d.u16()
-	if request.options != 0 && !(request.procedure == 7 && request.options & ^uint16(6) == 0 || request.procedure == 9 && request.options == 2) {
+	// fNoMetaData (2) permits, but does not require, cached-metadata omission.
+	// Ordinary RPCs always publish complete descriptors; fReuseMetaData (4)
+	// likewise requires descriptors even when an implementation has a cache.
+	// Cursor fetch may omit its already-advertised immutable metadata below.
+	// Recompile (1) and reserved flags have no implementation and must fail.
+	if request.options & ^uint16(6) != 0 {
 		return request, fmt.Errorf("unsupported TDS RPC options")
 	}
 	for len(d.data) != 0 && d.err == nil {

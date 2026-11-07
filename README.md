@@ -71,6 +71,11 @@ occupy 16 bytes while retaining their declared precision and scale. Nested
 variants, GUID, MAX/LOB and unrecognized bases fail explicitly. RPC decoding
 retains the base descriptor; cursor snapshots clone the owned scalar payload.
 
+RPC metadata hints `fNoMetaData` and `fReuseMetaData` are accepted. Ordinary
+requests always return complete column metadata, including first execution;
+static cursor fetch may omit its already-advertised immutable schema when
+requested. Recompile and reserved option bits remain unsupported.
+
 Prepared handles retain only opaque text and declarations. Cursor snapshots retain
 only bounded, cloned native payloads. Neither retains a query context, transaction,
 application session, callback closure, planner or storage object. Newly created

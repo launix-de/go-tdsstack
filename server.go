@@ -292,6 +292,26 @@ func (c *connection) execute(m tdsMessage, conn net.Conn) (err error) {
 			err = fmt.Errorf("request: %v", failure)
 		}
 		if err != nil {
+			if c.server.Handler.State != nil {
+				var stateErr error
+				if failure := catchWire(func() {
+					var snapshot Completion
+					snapshot, stateErr = c.server.Handler.State(ctx, c.session)
+					if stateErr == nil {
+						stateErr = c.completion(w, snapshot)
+					}
+				}); failure != nil {
+					stateErr = failure
+				}
+				if stateErr != nil {
+					err = fmt.Errorf("%v; session state: %w", err, stateErr)
+					return
+				}
+			}
+			status := uint16(2)
+			if c.transaction != 0 {
+				status |= 4
+			}
 			var b bytes.Buffer
 			if r.finish() {
 				tdsDone(&b, 0xfd, 0x20, 0)
@@ -300,9 +320,9 @@ func (c *connection) execute(m tdsMessage, conn net.Conn) (err error) {
 				if rpc {
 					b.WriteByte(0x79)
 					tdsU32(&b, 1)
-					tdsDone(&b, 0xfe, 2, 0)
+					tdsDone(&b, 0xfe, status, 0)
 				} else {
-					tdsDone(&b, 0xfd, 2, 0)
+					tdsDone(&b, 0xfd, status, 0)
 				}
 			}
 			if e := tdsWriteAll(w, b.Bytes()); e != nil {
@@ -316,6 +336,11 @@ func (c *connection) execute(m tdsMessage, conn net.Conn) (err error) {
 		return fmt.Errorf("RESETCONNECTIONSKIPTRAN unsupported")
 	}
 	if m.status&8 != 0 {
+		// RESET carries the pre-reset transaction descriptor. Validate that
+		// authority before resetting state, then announce its rollback.
+		if err = c.validateHeaders(m.data); err != nil {
+			return err
+		}
 		if c.server.Handler.Reset == nil {
 			return fmt.Errorf("reset handler unavailable")
 		}
@@ -328,8 +353,11 @@ func (c *connection) execute(m tdsMessage, conn net.Conn) (err error) {
 		c.preparedBytes = 0
 		c.cursors = nil
 		c.cursorBytes = 0
-		c.transaction = 0
 		var b bytes.Buffer
+		if c.transaction != 0 {
+			tdsTransaction(&b, 10, c.transaction)
+		}
+		c.transaction = 0
 		tdsDatabase(&b, c.initialDatabase, c.database)
 		c.database = c.initialDatabase
 		tdsToken(&b, 0xe3, []byte{18, 0, 0})
@@ -351,8 +379,10 @@ func (c *connection) execute(m tdsMessage, conn net.Conn) (err error) {
 		}
 		return w.flush(true)
 	}
-	if err = c.validateHeaders(m.data); err != nil {
-		return err
+	if m.status&8 == 0 {
+		if err = c.validateHeaders(m.data); err != nil {
+			return err
+		}
 	}
 	request := Request{Database: c.database, BrowseMetadata: c.browseMetadata}
 	execute := true

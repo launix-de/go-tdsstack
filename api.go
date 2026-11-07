@@ -73,6 +73,7 @@ type Request struct {
 }
 type Completion struct {
 	Rows          uint64
+	CountRows     bool // Use the number of rows emitted in this result set.
 	NoCount, More bool
 	Database      string
 	Transaction   TransactionState
@@ -101,10 +102,20 @@ type TransactionRequest struct {
 	SuccessorIsolation byte
 }
 
+// Message is a TDS informational token payload selected by the application.
+// The transport does not assign SQL meaning to its number, state or severity.
+type Message struct {
+	Number                  uint32
+	State, Severity         byte
+	Text, Server, Procedure string
+	Line                    uint32
+}
+
 // ResultWriter permits sequential result sets and serializes parallel row
 // callbacks. Fields must precede rows; Done ends one result. Methods return wire
 // errors and never synthesize descriptors or perform SQL conversion.
 type ResultWriter interface {
+	Info(Message) error
 	Fields([]Column) error
 	Row([]any) error
 	Done(Completion) error
@@ -119,8 +130,10 @@ type Handler struct {
 	Metadata     func(context.Context, Session, Request, ResultWriter) error
 	Transaction  func(context.Context, Session, TransactionRequest) (Completion, error)
 	BeginRequest func(context.Context, Session) error
-	Reset        func(context.Context, Session) (Session, error)
-	Close        func(Session)
+	// State snapshots transport state after a failed Execute, before ERROR/DONE.
+	State func(context.Context, Session) (Completion, error)
+	Reset func(context.Context, Session) (Session, error)
+	Close func(Session)
 }
 type Server struct {
 	// Collation is an application-selected session default announced at login.

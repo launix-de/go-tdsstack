@@ -63,6 +63,51 @@ type resultWriter struct {
 	err            error
 }
 
+// Info emits an informational token without creating or completing a rowset.
+func (r *resultWriter) Info(message Message) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return r.err
+	}
+	if r.done && !r.more {
+		return fmt.Errorf("result already completed")
+	}
+	if r.ctx != nil {
+		if err := r.ctx.Err(); err != nil {
+			return err
+		}
+	}
+	r.err = catchWire(func() {
+		var payload bytes.Buffer
+		if len(message.Text) > 3*65535 || len(message.Server) > 3*255 || len(message.Procedure) > 3*255 {
+			panic("informational message exceeds token field bounds")
+		}
+		for _, text := range []string{message.Text, message.Server, message.Procedure} {
+			if !utf8.ValidString(text) {
+				panic("informational message requires valid text")
+			}
+		}
+		text, server, procedure := tdsUTF16(message.Text), tdsUTF16(message.Server), tdsUTF16(message.Procedure)
+		if len(text)/2 > 65535 || len(server)/2 > 255 || len(procedure)/2 > 255 || 14+len(text)+len(server)+len(procedure) > 65535 {
+			panic("informational message exceeds token field bounds")
+		}
+		tdsU32(&payload, message.Number)
+		payload.Write([]byte{message.State, message.Severity})
+		tdsU16(&payload, uint16(len(text)/2))
+		payload.Write(text)
+		payload.WriteByte(byte(len(server) / 2))
+		payload.Write(server)
+		payload.WriteByte(byte(len(procedure) / 2))
+		payload.Write(procedure)
+		tdsU32(&payload, message.Line)
+		var token bytes.Buffer
+		tdsToken(&token, 0xab, payload.Bytes())
+		r.write(token.Bytes())
+	})
+	return r.err
+}
+
 func (r *resultWriter) Fields(columns []Column) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -333,6 +378,9 @@ func (r *resultWriter) Done(c Completion) error {
 	}
 	if r.done && !r.more {
 		return fmt.Errorf("result already completed")
+	}
+	if c.CountRows {
+		c.Rows = r.count
 	}
 	if r.completion != nil {
 		if err := r.completion(c); err != nil {

@@ -55,6 +55,14 @@ type snapshotWriter struct {
 	bytes        int
 	fields, done bool
 	ctx          context.Context
+	info         func(Message) error
+}
+
+func (s *snapshotWriter) Info(message Message) error {
+	if s.info == nil {
+		return fmt.Errorf("cursor informational sink is unavailable")
+	}
+	return s.info(message)
 }
 
 func (s *snapshotWriter) Fields(columns []Column) error {
@@ -125,7 +133,7 @@ func (s *snapshotWriter) Done(c Completion) error {
 	s.done = true
 	return nil
 }
-func (c *connection) openCursor(r tdsRPC, state *requestState) (*cursorSnapshot, int32) {
+func (c *connection) openCursor(r tdsRPC, state *requestState, info func(Message) error) (*cursorSnapshot, int32) {
 	a := r.arguments
 	if len(a) < 5 || c.server.Handler.Describe == nil {
 		panic("cursor requires pure describe")
@@ -162,7 +170,7 @@ func (c *connection) openCursor(r tdsRPC, state *requestState) (*cursorSnapshot,
 	if _, err := c.server.Handler.Describe(state.ctx, c.session, q); err != nil {
 		panic(err)
 	}
-	sink := &snapshotWriter{ctx: state.ctx}
+	sink := &snapshotWriter{ctx: state.ctx, info: info}
 	if err := c.server.Handler.Execute(state.ctx, c.session, q, sink); err != nil {
 		panic(err)
 	}
@@ -247,7 +255,7 @@ func (c *connection) cursorRPC(rpc tdsRPC, request *requestState, response *tdsR
 	position, fetched := 0, 0
 	switch rpc.procedure {
 	case 2:
-		cursor, handle := c.openCursor(rpc, request)
+		cursor, handle := c.openCursor(rpc, request, (&resultWriter{w: response, ctx: request.ctx}).Info)
 		if c.cursors == nil {
 			c.cursors = make(map[int32]*cursorSnapshot)
 		}

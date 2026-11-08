@@ -35,6 +35,7 @@ func tdsGUIDBytes(data []byte) []byte {
 type tdsMessage struct {
 	kind, status byte
 	data         []byte
+	bulk         *io.PipeReader
 }
 
 func readTDSMessage(r io.Reader) (tdsMessage, error) {
@@ -230,11 +231,23 @@ type tdsDecoder struct {
 	data       []byte
 	err        error
 	descriptor WireType
+	reader     io.Reader // Bulk values reuse the ordinary bounded wire decoder.
+	remaining  int
 }
 
 func (d *tdsDecoder) take(n int) []byte {
 	if d.err != nil {
 		return nil
+	}
+	if d.reader != nil {
+		if n < 0 || n > d.remaining {
+			d.err = fmt.Errorf("TDS row exceeds decoding budget")
+			return nil
+		}
+		d.remaining -= n
+		value := make([]byte, n)
+		_, d.err = io.ReadFull(d.reader, value)
+		return value
 	}
 	if n < 0 || n > len(d.data) {
 		d.err = io.ErrUnexpectedEOF

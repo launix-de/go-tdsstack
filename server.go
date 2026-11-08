@@ -4,10 +4,12 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 package tds
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -202,11 +204,39 @@ func (c *connection) serve() {
 	defer close(done)
 	go func() {
 		defer close(messages)
+		input := bufio.NewReader(conn)
 		for {
-			m, err := readTDSMessage(conn)
+			header, err := input.Peek(8)
 			if err != nil {
 				c.cancelConnection()
-				c.cancel()
+				return
+			}
+			if header[0] == 7 {
+				reader, writer := io.Pipe()
+				packets := &bulkPackets{r: input}
+				select {
+				case messages <- tdsMessage{kind: 7, bulk: reader}:
+				case <-done:
+					reader.Close()
+					writer.Close()
+					return
+				}
+				_, err = io.Copy(writer, packets)
+				writer.CloseWithError(err)
+				// An application can reject metadata before reading the body.
+				// Discard the rest without buffering, preserving request framing.
+				if err == io.ErrClosedPipe {
+					_, err = io.Copy(io.Discard, packets)
+				}
+				if err != nil {
+					c.cancelConnection()
+					return
+				}
+				continue
+			}
+			m, err := readTDSMessage(input)
+			if err != nil {
+				c.cancelConnection()
 				return
 			}
 			if m.kind == 6 {
@@ -273,6 +303,9 @@ func (c *connection) completion(w *tdsResponse, x Completion) error {
 	return err
 }
 func (c *connection) execute(m tdsMessage, conn net.Conn) (err error) {
+	if m.bulk != nil {
+		defer m.bulk.Close()
+	}
 	ctx, cancel := context.WithCancel(c.ctx)
 	r := &requestState{ctx: ctx, cancel: cancel}
 	c.request.Store(r)
@@ -379,7 +412,7 @@ func (c *connection) execute(m tdsMessage, conn net.Conn) (err error) {
 		}
 		return w.flush(true)
 	}
-	if m.status&8 == 0 {
+	if m.status&8 == 0 && m.kind != 7 {
 		if err = c.validateHeaders(m.data); err != nil {
 			return err
 		}
@@ -387,6 +420,25 @@ func (c *connection) execute(m tdsMessage, conn net.Conn) (err error) {
 	request := Request{Database: c.database, BrowseMetadata: c.browseMetadata}
 	execute := true
 	switch m.kind {
+	case 7:
+		if c.server.Handler.Bulk == nil {
+			return fmt.Errorf("bulk handler unavailable")
+		}
+		bulk, e := newBulkReader(ctx, m.bulk)
+		if e != nil {
+			return e
+		}
+		completion, e := c.server.Handler.Bulk(ctx, c.session, bulk)
+		if e != nil {
+			return e
+		}
+		if !bulk.complete {
+			return fmt.Errorf("bulk handler returned before validated end of input")
+		}
+		if err = writer.Done(completion); err != nil {
+			return err
+		}
+		execute = false
 	case 1:
 		data, e := tdsStripHeaders(m.data)
 		if e != nil {

@@ -20,6 +20,9 @@ type WireType struct {
 
 // Parameter owns its decoded data. Value is nil, int64, float64, bool, string,
 // []byte, Decimal, Temporal, or Variant; it is never an application/runtime value.
+// GUIDTYPE (0x24, Size 16) uses owned []byte in canonical UUID byte order;
+// the transport alone converts Data1/Data2/Data3 to/from little-endian wire order.
+// An incoming GUID NULL may additionally declare Size 0, retaining that descriptor.
 type Parameter struct {
 	Name  string
 	Flags byte

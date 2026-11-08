@@ -56,6 +56,12 @@ are serialized only at this output boundary. Each row is completely validated
 before publishing its ROW token, so malformed payloads cannot swallow an error token.
 
 Use `int64`, `float64`, `bool`, `string`, `[]byte`, or `nil` for ordinary wire values.
+Standalone GUIDTYPE (`0x24`, Size 16) uses exactly sixteen canonical UUID bytes
+in `[]byte`, or `nil` for NULL. The codec owns the TDS mixed-endian field order;
+UUID text parsing and formatting remain application concerns. Metadata always
+retains Size 16, including NULL; non-NULL payload lengths other than 16 fail.
+Incoming typed GUID NULL also accepts the protocol's zero-width descriptor;
+that width never admits a non-NULL value.
 `Decimal` carries an unscaled canonical integer string; no binary floating point
 conversion occurs. `Temporal` carries day ordinal, wire clock units and original
 offset minutes. These are transient protocol payloads, not persistent SQL types.

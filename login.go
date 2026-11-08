@@ -78,6 +78,7 @@ func tdsPreloginEncryption(data []byte) (byte, error) {
 
 type tdsLogin struct {
 	user, password, database string
+	hostName, appName        string
 	browseMetadata           bool
 	session                  Session
 }
@@ -112,6 +113,12 @@ func decodeTDSLogin(data []byte) (tdsLogin, error) {
 		return tdsText(field)
 	}
 	var err error
+	if login.hostName, err = get(36, false); err != nil {
+		return login, err
+	}
+	if login.appName, err = get(48, false); err != nil {
+		return login, err
+	}
 	if login.user, err = get(40, false); err != nil {
 		return login, err
 	}
@@ -174,7 +181,7 @@ func (s *Server) handshake(ctx context.Context, conn net.Conn) (net.Conn, tdsLog
 	if login.database == "" {
 		login.database = s.Database
 	}
-	session, authErr := s.Handler.Authenticate(ctx, Login{User: login.user, Password: login.password, Database: login.database, RemoteAddress: conn.RemoteAddr().String(), BrowseMetadata: login.browseMetadata})
+	session, authErr := s.Handler.Authenticate(ctx, Login{HostName: login.hostName, AppName: login.appName, User: login.user, Password: login.password, Database: login.database, RemoteAddress: conn.RemoteAddr().String(), BrowseMetadata: login.browseMetadata})
 	if authErr != nil {
 		var tokens bytes.Buffer
 		tdsError(&tokens, 18456, "Login failed")

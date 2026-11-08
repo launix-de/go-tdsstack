@@ -29,6 +29,11 @@ if err != nil {
 return server.Serve(listener)
 ```
 
+`Authenticate` receives `Login.HostName` and `Login.AppName` exactly as supplied
+by the client in LOGIN7, including empty strings. These are untrusted client
+labels, not server configuration or authenticated identity. Applications may
+retain them in their connection state; the transport does not interpret them.
+
 `Authenticate` returns application session state. `Execute` receives an untouched
 batch string, optional untouched declaration string, and typed native parameters.
 The application parses, validates, converts and binds these. Its callbacks must

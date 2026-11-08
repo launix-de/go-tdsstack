@@ -103,7 +103,7 @@ func rowIntPattern(n int64, cursor bool) []byte {
 	b.WriteByte(0xd1)
 	b.Write(encodeWireValue(fixtureColumn("v", 0x26, 8), n))
 	if cursor {
-		b.Write(encodeWireValue(fixtureColumn("rowstat", 0x26, 4), int64(1)))
+		tdsU32(&b, 1) // nonnullable cursor row status uses fixed INT4
 	}
 	return b.Bytes()
 }

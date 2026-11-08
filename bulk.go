@@ -164,10 +164,20 @@ func (b *BulkReader) next() ([]any, error) {
 	case 0xfd:
 		status := b.d.u16()
 		b.d.u16() // CurCmd is reserved for the sender's command identification.
-		count := b.d.u64()
 		if b.d.err != nil {
 			return nil, b.d.err
 		}
+		var countBytes [8]byte
+		n, countErr := io.ReadFull(b.d.reader, countBytes[:])
+		// Framework SqlClient WriteBulkCopyDone emits a 32-bit zero count
+		// even on TDS 7.4. Accept only that exact no-count form at a proven
+		// message boundary, never arbitrary truncated or nonzero counts.
+		short := n == 4 && countErr == io.ErrUnexpectedEOF && status == 0 &&
+			binary.LittleEndian.Uint32(countBytes[:4]) == 0
+		if countErr != nil && !short {
+			return nil, countErr
+		}
+		count := binary.LittleEndian.Uint64(countBytes[:])
 		if status & ^uint16(0x10) != 0 || status&0x10 != 0 && count != b.rows {
 			return nil, fmt.Errorf("invalid bulk DONE")
 		}

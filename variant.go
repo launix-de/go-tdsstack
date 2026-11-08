@@ -16,26 +16,10 @@ func variantBase(t WireType) (byte, []byte, int) {
 	if !validType(t) {
 		panic("invalid sql_variant base descriptor")
 	}
+	if fixed := fixedScalarKind(t); fixed != 0 {
+		return fixed, nil, 1
+	}
 	switch t.Kind {
-	case 0x26:
-		return map[int]byte{1: 0x30, 2: 0x34, 4: 0x38, 8: 0x7f}[t.Size], nil, 1
-	case 0x68:
-		return 0x32, nil, 1
-	case 0x6d:
-		if t.Size == 4 {
-			return 0x3b, nil, 1
-		}
-		return 0x3e, nil, 1
-	case 0x6e:
-		if t.Size == 4 {
-			return 0x7a, nil, 1
-		}
-		return 0x3c, nil, 1
-	case 0x6f:
-		if t.Size == 4 {
-			return 0x3a, nil, 1
-		}
-		return 0x3d, nil, 1
 	case 0x28:
 		return t.Kind, nil, 1
 	case 0x29, 0x2a, 0x2b:

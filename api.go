@@ -58,6 +58,9 @@ type Column struct {
 	Browse   bool
 }
 type Login struct {
+	// HostName and AppName are untrusted, client-supplied LOGIN7 metadata.
+	// They identify the connecting client, never the server or an authority.
+	HostName, AppName                       string
 	User, Password, Database, RemoteAddress string
 	BrowseMetadata                          bool
 }

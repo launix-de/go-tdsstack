@@ -6,6 +6,23 @@ A bounded TDS 7.4 server transport for Go applications. It supplies packet frami
 TLS/login, RPC and prepared handle lifecycle, static read-only cursor snapshots,
 result tokens and exact scalar wire codecs.
 
+`Handler.Bulk` accepts the TDS BulkLoadBCP stream following an application-owned
+`INSERT BULK` command. The transport never parses that command or chooses a
+destination. `BulkReader.Columns()` returns the explicit wire schema;
+`BulkReader.Next()` returns one owned row at a time. Input uses packet-sized
+backpressure with no whole-message or rowset buffer. Metadata is bounded to 4096
+columns and each encoded row has a 64 MiB decoding budget.
+
+The application must authorize the destination, validate the schema, own a
+transaction, and roll back on every error. Commit only after `Next()` returns
+`io.EOF`: this proves a valid DONE token and a clean message boundary. Truncation,
+trailing bytes, error/abort flags and malformed values never yield successful
+EOF. Returning from the handler without consuming the validated end is an error.
+An early application rejection drains the remaining packets without buffering;
+the next request retains its boundary. Bulk callbacks are request-local, serial,
+and must not retain the reader. Supported scalar descriptors use the same exact
+codecs as RPC values; legacy TEXT/IMAGE, XML/UDT tokens and unrecognized types fail.
+
 The package does not parse SQL, infer SQL types, own database transactions, or bind
 application parameters. It uses native Go data and opaque application sessions.
 Applications supply explicit column descriptors before rows, even for empty and

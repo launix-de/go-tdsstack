@@ -134,6 +134,10 @@ type Handler struct {
 	Execute      func(context.Context, Session, Request, ResultWriter) error
 	Describe     func(context.Context, Session, Request) ([]Column, error)
 	Metadata     func(context.Context, Session, Request, ResultWriter) error
+	// Bulk receives wire rows only. The application authorizes and remembers the
+	// destination in its preceding Execute callback. It must consume through EOF
+	// before committing; EOF proves a valid DONE token and message boundary.
+	Bulk         func(context.Context, Session, *BulkReader) (Completion, error)
 	Transaction  func(context.Context, Session, TransactionRequest) (Completion, error)
 	BeginRequest func(context.Context, Session) error
 	// State snapshots transport state after a failed Execute, before ERROR/DONE.

@@ -28,6 +28,10 @@ func catchWire(fn func()) (err error) {
 }
 func validType(t WireType) bool {
 	switch t.Kind {
+	case 0x24:
+		return t.Size == 16
+	case 0x62:
+		return t.Size > 0 && t.Size <= 8016
 	case 0x26:
 		return t.Size == 1 || t.Size == 2 || t.Size == 4 || t.Size == 8
 	case 0x68:
@@ -59,6 +63,51 @@ type resultWriter struct {
 	rpc            bool
 	completion     func(Completion) error
 	err            error
+}
+
+// Info emits an informational token without creating or completing a rowset.
+func (r *resultWriter) Info(message Message) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return r.err
+	}
+	if r.done && !r.more {
+		return fmt.Errorf("result already completed")
+	}
+	if r.ctx != nil {
+		if err := r.ctx.Err(); err != nil {
+			return err
+		}
+	}
+	r.err = catchWire(func() {
+		var payload bytes.Buffer
+		if len(message.Text) > 3*65535 || len(message.Server) > 3*255 || len(message.Procedure) > 3*255 {
+			panic("informational message exceeds token field bounds")
+		}
+		for _, text := range []string{message.Text, message.Server, message.Procedure} {
+			if !utf8.ValidString(text) {
+				panic("informational message requires valid text")
+			}
+		}
+		text, server, procedure := tdsUTF16(message.Text), tdsUTF16(message.Server), tdsUTF16(message.Procedure)
+		if len(text)/2 > 65535 || len(server)/2 > 255 || len(procedure)/2 > 255 || 14+len(text)+len(server)+len(procedure) > 65535 {
+			panic("informational message exceeds token field bounds")
+		}
+		tdsU32(&payload, message.Number)
+		payload.Write([]byte{message.State, message.Severity})
+		tdsU16(&payload, uint16(len(text)/2))
+		payload.Write(text)
+		payload.WriteByte(byte(len(server) / 2))
+		payload.Write(server)
+		payload.WriteByte(byte(len(procedure) / 2))
+		payload.Write(procedure)
+		tdsU32(&payload, message.Line)
+		var token bytes.Buffer
+		tdsToken(&token, 0xab, payload.Bytes())
+		r.write(token.Bytes())
+	})
+	return r.err
 }
 
 func (r *resultWriter) Fields(columns []Column) error {
@@ -104,7 +153,9 @@ func (r *resultWriter) publish() {
 		tdsU16(&metadata, col.Flags)
 		metadata.WriteByte(col.Kind)
 		switch col.Kind {
-		case 0x26, 0x6d:
+		case 0x62:
+			tdsU32(&metadata, uint32(col.Size))
+		case 0x24, 0x26, 0x6d:
 			size := col.Size
 			metadata.WriteByte(byte(size))
 		case 0x68:
@@ -188,6 +239,9 @@ func (r *resultWriter) publish() {
 }
 func encodeWireValue(col Column, value any) []byte {
 	kind := col.Kind
+	if kind == 0x62 {
+		return tdsEncodeVariant(col, value)
+	}
 	if kind == 0x6a || kind == 0x6c || kind == 0x6e {
 		return tdsEncodeNumeric(col, value)
 	}
@@ -196,6 +250,16 @@ func encodeWireValue(col Column, value any) []byte {
 	}
 	var b bytes.Buffer
 	switch kind {
+	case 0x24:
+		if value == nil {
+			return []byte{0}
+		}
+		guid, ok := value.([]byte)
+		if !ok || len(guid) != 16 {
+			panic("GUID wire value requires exactly 16 bytes")
+		}
+		b.WriteByte(16)
+		b.Write(tdsGUIDBytes(guid))
 	case 0x26, 0x68, 0x6d:
 		if value == nil {
 			return []byte{0}
@@ -326,6 +390,9 @@ func (r *resultWriter) Done(c Completion) error {
 	}
 	if r.done && !r.more {
 		return fmt.Errorf("result already completed")
+	}
+	if c.CountRows {
+		c.Rows = r.count
 	}
 	if r.completion != nil {
 		if err := r.completion(c); err != nil {

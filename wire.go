@@ -23,6 +23,15 @@ const tdsMaxMessage = 16 << 20
 const tdsMaxValue = 64 << 20
 const tdsPacketSize = 4096
 
+// GUIDTYPE uses little-endian Data1/Data2/Data3 and an unchanged eight-byte
+// Data4 array (MS-TDS 2.2.5.5.1.7, MS-DTYP 2.3.4). Application []byte payloads
+// use canonical UUID byte order. The same involution encodes and decodes;
+// callers validate the exact sixteen-byte length before entering this helper.
+func tdsGUIDBytes(data []byte) []byte {
+	return []byte{data[3], data[2], data[1], data[0], data[5], data[4], data[7], data[6],
+		data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15]}
+}
+
 type tdsMessage struct {
 	kind, status byte
 	data         []byte
@@ -316,6 +325,23 @@ func (d *tdsDecoder) parameter() any {
 	kind := d.u8()
 	d.descriptor = WireType{Kind: kind}
 	switch kind {
+	case 0x24:
+		maxSize, size := d.u8(), d.u8()
+		d.descriptor.Size = int(maxSize)
+		if (maxSize != 16 && maxSize != 0) || (size != 0 && size != 16) || (maxSize == 0 && size != 0) {
+			d.err = fmt.Errorf("invalid TDS GUID length")
+			return nil
+		}
+		if size == 0 {
+			return nil
+		}
+		data := d.take(16)
+		if d.err != nil {
+			return nil
+		}
+		return tdsGUIDBytes(data)
+	case 0x62:
+		return d.variant()
 	case 0x23, 0x63, 0x22: // legacy TEXT, NTEXT and IMAGE input parameters
 		maxSize := d.u32()
 		d.descriptor.Size = int(maxSize)
@@ -515,7 +541,12 @@ func decodeTDSRPC(data []byte) (tdsRPC, error) {
 		}
 	}
 	request.options = d.u16()
-	if request.options != 0 && !(request.procedure == 7 && request.options & ^uint16(6) == 0 || request.procedure == 9 && request.options == 2) {
+	// fNoMetaData (2) permits, but does not require, cached-metadata omission.
+	// Ordinary RPCs always publish complete descriptors; fReuseMetaData (4)
+	// likewise requires descriptors even when an implementation has a cache.
+	// Cursor fetch may omit its already-advertised immutable metadata below.
+	// Recompile (1) and reserved flags have no implementation and must fail.
+	if request.options & ^uint16(6) != 0 {
 		return request, fmt.Errorf("unsupported TDS RPC options")
 	}
 	for len(d.data) != 0 && d.err == nil {

@@ -36,6 +36,12 @@ finish all parallel row producers before returning. Cancellation covers the whol
 request, including `Describe`. Pure `Describe` validates prepared or cursor shapes
 without executing a statement. The library never constructs SQL transaction text.
 
+`Server.Collation` optionally supplies the five-byte default session collation
+announced by ENVCHANGE type 7 during successful login. The transport does not
+choose an SQL collation or infer it from result rows; the all-zero default omits
+the announcement for compatibility. Clients need this default when encoding ANSI
+or SQL_VARIANT RPC parameters before any result metadata has been received.
+
 `Metadata` handles named procedure requests in the frontend. `Transaction` receives
 explicit wire actions. A requested transaction successor invokes the completion
 callback first and invokes begin only if completion succeeds. `BeginRequest` is an
@@ -50,10 +56,31 @@ are serialized only at this output boundary. Each row is completely validated
 before publishing its ROW token, so malformed payloads cannot swallow an error token.
 
 Use `int64`, `float64`, `bool`, `string`, `[]byte`, or `nil` for ordinary wire values.
+Standalone GUIDTYPE (`0x24`, Size 16) uses exactly sixteen canonical UUID bytes
+in `[]byte`, or `nil` for NULL. The codec owns the TDS mixed-endian field order;
+UUID text parsing and formatting remain application concerns. Metadata always
+retains Size 16, including NULL; non-NULL payload lengths other than 16 fail.
+Incoming typed GUID NULL also accepts the protocol's zero-width descriptor;
+that width never admits a non-NULL value.
 `Decimal` carries an unscaled canonical integer string; no binary floating point
 conversion occurs. `Temporal` carries day ordinal, wire clock units and original
 offset minutes. These are transient protocol payloads, not persistent SQL types.
 The application performs scale, precision, calendar and implicit-cast semantics.
+
+`Variant{Type: ..., Value: ...}` supplies explicit per-value base metadata for
+SQL_VARIANT (column/parameter kind `0x62`, maximum size 8016 bytes). Its base
+`Type` uses the ordinary nullable descriptors; the codec translates them to the
+fixed base tokens specified by MS-TDS 2.2.5.5.4. NULL is an outer `nil`, not a
+Variant wrapping nil. Supported bases are integer, bit, float, money, decimal,
+date/time and bounded character/binary types. Decimal variant magnitudes always
+occupy 16 bytes while retaining their declared precision and scale. Nested
+variants, GUID, MAX/LOB and unrecognized bases fail explicitly. RPC decoding
+retains the base descriptor; cursor snapshots clone the owned scalar payload.
+
+RPC metadata hints `fNoMetaData` and `fReuseMetaData` are accepted. Ordinary
+requests always return complete column metadata, including first execution;
+static cursor fetch may omit its already-advertised immutable schema when
+requested. Recompile and reserved option bits remain unsupported.
 
 Prepared handles retain only opaque text and declarations. Cursor snapshots retain
 only bounded, cloned native payloads. Neither retains a query context, transaction,

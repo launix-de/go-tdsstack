@@ -56,7 +56,16 @@ func validType(t WireType) bool {
 func fixedScalarKind(t WireType) byte {
 	switch t.Kind {
 	case 0x26:
-		return map[int]byte{1: 0x30, 2: 0x34, 4: 0x38, 8: 0x7f}[t.Size]
+		switch t.Size {
+		case 1:
+			return 0x30
+		case 2:
+			return 0x34
+		case 4:
+			return 0x38
+		case 8:
+			return 0x7f
+		}
 	case 0x68:
 		return 0x32
 	case 0x6d:

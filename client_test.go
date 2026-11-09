@@ -326,7 +326,7 @@ func TestClientStructuredErrorsPreserveDiagnostic(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	check := func(err error, want Message) {
+	check := func(t *testing.T, err error, want Message) {
 		t.Helper()
 		var actual tdsdriver.Error
 		if !errors.As(err, &actual) || uint32(actual.Number) != want.Number || actual.State != want.State || actual.Class != want.Severity ||
@@ -360,18 +360,18 @@ func TestClientStructuredErrorsPreserveDiagnostic(t *testing.T) {
 				_, err = conn.ExecContext(ctx, "sp_cursoropen", sql.Named("cursor", sql.Out{Dest: &handle}), sql.Named("stmt", "opaque structured failure"),
 					sql.Named("scroll", sql.Out{Dest: &scroll, In: true}), sql.Named("concurrency", sql.Out{Dest: &concurrency, In: true}), sql.Named("count", sql.Out{Dest: &count, In: true}))
 			}
-			check(err, payload)
+			check(t, err, payload)
 			if handle != 0 {
 				t.Fatal("failed request published a handle", handle)
 			}
 		})
 	}
 	_, err = conn.ExecContext(ctx, "opaque ordinary failure")
-	check(err, Message{Number: 50000, State: 1, Severity: 16, Text: "ordinary backend failure", Server: "TDS", Line: 1})
+	check(t, err, Message{Number: 50000, State: 1, Severity: 16, Text: "ordinary backend failure", Server: "TDS", Line: 1})
 	_, err = conn.ExecContext(ctx, "opaque nil diagnostic")
-	check(err, Message{Number: 50000, State: 1, Severity: 16, Text: "wrapped nil: nil diagnostic error", Server: "TDS", Line: 1})
+	check(t, err, Message{Number: 50000, State: 1, Severity: 16, Text: "wrapped nil: nil diagnostic error", Server: "TDS", Line: 1})
 	_, err = conn.ExecContext(ctx, "opaque invalid diagnostic")
-	check(err, Message{Number: 50000, State: 1, Severity: 16, Text: "diagnostic fields exceed wire length limits", Server: "TDS", Line: 1})
+	check(t, err, Message{Number: 50000, State: 1, Severity: 16, Text: "diagnostic fields exceed wire length limits", Server: "TDS", Line: 1})
 	var value int
 	if err := conn.QueryRowContext(ctx, "SELECT 1").Scan(&value); err != nil || value != 1 {
 		t.Fatal("error response corrupted the next request", value, err)

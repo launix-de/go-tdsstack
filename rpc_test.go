@@ -333,3 +333,119 @@ func (failedConnection) RemoteAddr() net.Addr             { return &net.TCPAddr{
 func (failedConnection) SetDeadline(time.Time) error      { return nil }
 func (failedConnection) SetReadDeadline(time.Time) error  { return nil }
 func (failedConnection) SetWriteDeadline(time.Time) error { return nil }
+
+func TestStructuredErrorCompletionAndHandleLifetime(t *testing.T) {
+	failure := &DiagnosticError{Message: Message{Number: 8115, State: 4, Severity: 16, Text: "application failure", Server: "node", Procedure: "load", Line: 70001}}
+	var executions atomic.Int64
+	_, dsn, _ := startClient(t, false, func(s *Server) {
+		execute, describe := s.Handler.Execute, s.Handler.Describe
+		s.Handler.Execute = func(ctx context.Context, session Session, r Request, w ResultWriter) error {
+			if r.Text == "opaque execute failure" {
+				executions.Add(1)
+				return fmt.Errorf("wrapped: %w", failure)
+			}
+			return execute(ctx, session, r, w)
+		}
+		s.Handler.Describe = func(ctx context.Context, session Session, r Request) ([]Column, error) {
+			if r.Text == "opaque describe failure" {
+				return nil, failure
+			}
+			return describe(ctx, session, r)
+		}
+	})
+	c := rawClient(t, dsn)
+	check := func(data []byte, rpc bool) {
+		t.Helper()
+		token, err := tdsDiagnostic(0xaa, failure.Message)
+		if err != nil || !bytes.HasPrefix(data, token) {
+			t.Fatalf("missing diagnostic: %x / %v", data, err)
+		}
+		var tail bytes.Buffer
+		if rpc {
+			tail.WriteByte(0x79)
+			tdsU32(&tail, 1)
+			tdsDone(&tail, 0xfe, 2, 0)
+		} else {
+			tdsDone(&tail, 0xfd, 2, 0)
+		}
+		if !bytes.Equal(data[len(token):], tail.Bytes()) {
+			t.Fatalf("error completion or unpublished handle changed: %x", data)
+		}
+	}
+	if err := writeTDSMessage(c, 1, append(allHeaders(0), tdsUTF16("opaque execute failure")...)); err != nil {
+		t.Fatal(err)
+	}
+	m, err := readTDSMessage(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(m.data, false)
+	check(exchange(t, c, 11, intParam("handle", 0, true), textParam(""), textParam("opaque describe failure")), true)
+	data := exchange(t, c, 11, intParam("handle", 0, true), textParam(""), textParam("SELECT 1"))
+	if handle, ok := returnInt(data, "handle", 0); !ok || handle != 1 || executions.Load() != 1 {
+		t.Fatal("failed describe consumed handle or executed", handle, ok, executions.Load())
+	}
+	check(exchange(t, c, 13, intParam("handle", 0, true), textParam(""), textParam("opaque execute failure")), true)
+	data = exchange(t, c, 12, intParam("", 2, false))
+	if !bytes.Contains(data, tdsUTF16("unknown prepared handle")) {
+		t.Fatalf("failed combined request retained handle: %x", data)
+	}
+	data = exchange(t, c, 12, intParam("", 1, false))
+	if !bytes.Contains(data, rowIntPattern(1, false)) || executions.Load() != 2 {
+		t.Fatal("failed request corrupted existing prepared handle", executions.Load())
+	}
+}
+
+func TestStructuredErrorRespectsAttention(t *testing.T) {
+	entered := make(chan struct{})
+	_, dsn, _ := startClient(t, false, func(s *Server) {
+		execute := s.Handler.Execute
+		s.Handler.Execute = func(ctx context.Context, session Session, r Request, w ResultWriter) error {
+			if r.Text == "opaque cancelled failure" {
+				close(entered)
+				<-ctx.Done()
+				return &DiagnosticError{Message: Message{Number: 8115, Severity: 16, Text: "cancelled error must not publish"}}
+			}
+			return execute(ctx, session, r, w)
+		}
+	})
+	c := rawClient(t, dsn)
+	if err := writeTDSMessage(c, 1, append(allHeaders(0), tdsUTF16("opaque cancelled failure")...)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("handler not entered")
+	}
+	if err := writeTDSMessage(c, 6, nil); err != nil {
+		t.Fatal(err)
+	}
+	m, err := readTDSMessage(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want bytes.Buffer
+	tdsDone(&want, 0xfd, 0x20, 0)
+	if !bytes.Equal(m.data, want.Bytes()) {
+		t.Fatalf("cancelled error replaced attention completion: %x", m.data)
+	}
+	data := exchange(t, c, 11, intParam("handle", 0, true), textParam(""), textParam("SELECT 1"))
+	if handle, ok := returnInt(data, "handle", 0); !ok || handle != 1 {
+		t.Fatal("attention corrupted next request", handle, ok)
+	}
+}
+
+func TestStructuredErrorFailedPublicationDropsHandle(t *testing.T) {
+	s := &Server{Handler: Handler{
+		Describe: func(context.Context, Session, Request) ([]Column, error) { return nil, nil },
+		Execute: func(context.Context, Session, Request, ResultWriter) error {
+			return &DiagnosticError{Message: Message{Number: 8115, Severity: 16, Text: "application failure"}}
+		},
+	}}
+	c := &connection{ctx: context.Background(), server: s, database: "fixture"}
+	err := c.execute(tdsMessage{kind: 3, data: encodeRPC(13, intParam("handle", 0, true), textParam(""), textParam("opaque text"))}, failedConnection{})
+	if err == nil || len(c.prepared) != 0 || c.preparedBytes != 0 {
+		t.Fatal("failed error publication retained prepared handle", err, len(c.prepared), c.preparedBytes)
+	}
+}

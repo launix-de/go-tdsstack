@@ -58,6 +58,13 @@ finish all parallel row producers before returning. Cancellation covers the whol
 request, including `Describe`. Pure `Describe` validates prepared or cursor shapes
 without executing a statement. The library never constructs SQL transaction text.
 
+Handlers may return `&DiagnosticError{Message: Message{...}}` to emit explicit
+ERROR metadata; ordinary `%w` wrapping preserves it. The same `Message` payload
+and bounded UTF-16 encoder serve INFO and ERROR without changing `Info(Message)`
+or the `ResultWriter` interface. Invalid explicit diagnostics fail through a
+bounded generic error, and ordinary handler failures keep their existing
+50000/state 1/severity 16 defaults. The transport does not infer SQL error codes.
+
 `Server.Collation` optionally supplies the five-byte default session collation
 announced by ENVCHANGE type 7 during successful login. The transport does not
 choose an SQL collation or infer it from result rows; the all-zero default omits

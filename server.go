@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -349,7 +350,18 @@ func (c *connection) execute(m tdsMessage, conn net.Conn) (err error) {
 			if r.finish() {
 				tdsDone(&b, 0xfd, 0x20, 0)
 			} else {
-				tdsError(&b, 50000, err.Error())
+				var diagnostic Message
+				var applicationError *DiagnosticError
+				if errors.As(err, &applicationError) && applicationError != nil {
+					diagnostic = applicationError.Message
+				} else {
+					diagnostic = tdsDefaultDiagnostic(50000, err.Error())
+				}
+				token, encodingError := tdsDiagnostic(0xaa, diagnostic)
+				if encodingError != nil {
+					token, _ = tdsDiagnostic(0xaa, tdsDefaultDiagnostic(50000, encodingError.Error()))
+				}
+				b.Write(token)
 				if rpc {
 					b.WriteByte(0x79)
 					tdsU32(&b, 1)

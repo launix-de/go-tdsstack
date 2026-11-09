@@ -175,3 +175,58 @@ func TestBulkReleasedClientStreaming(t *testing.T) {
 		t.Fatalf("rows %d committed %d: %v", rows, committed.Load(), err)
 	}
 }
+
+// Framework SqlClient uses a 32-bit zero DONE count even after a TDS 7.4 login.
+// This exception must never turn other truncation or following requests into EOF.
+func TestBulkFrameworkShortDone(t *testing.T) {
+	prefix := bulkFixture()
+	prefix = prefix[:len(prefix)-13]
+	for _, fixture := range []struct {
+		name   string
+		status uint16
+		count  []byte
+		valid  bool
+	}{
+		{"framework", 0, make([]byte, 4), true},
+		{"count0", 0, nil, false}, {"count1", 0, make([]byte, 1), false},
+		{"count2", 0, make([]byte, 2), false}, {"count3", 0, make([]byte, 3), false},
+		{"count5", 0, make([]byte, 5), false}, {"count6", 0, make([]byte, 6), false},
+		{"count7", 0, make([]byte, 7), false}, {"nonzero", 0, []byte{1, 0, 0, 0}, false},
+		{"countflag", 0x10, make([]byte, 4), false}, {"errorflag", 2, make([]byte, 4), false},
+		{"full", 0, make([]byte, 8), true}, {"trailing", 0, make([]byte, 9), false},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			var payload, packets bytes.Buffer
+			payload.Write(prefix)
+			payload.WriteByte(0xfd)
+			tdsU16(&payload, fixture.status)
+			tdsU16(&payload, 0)
+			payload.Write(fixture.count)
+			if err := writeTDSMessage(&packets, 7, payload.Bytes()); err != nil {
+				t.Fatal(err)
+			}
+			next := []byte("following request must remain untouched")
+			packets.Write(next)
+			reader := bytes.NewReader(packets.Bytes())
+			b, err := newBulkReader(context.Background(), &bulkPackets{r: reader})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = b.Next(); err != nil {
+				t.Fatal(err)
+			}
+			_, err = b.Next()
+			if fixture.valid {
+				if err != io.EOF || !b.complete {
+					t.Fatalf("valid DONE rejected: %v", err)
+				}
+			} else if err == nil || err == io.EOF || b.complete {
+				t.Fatalf("malformed DONE accepted: %v", err)
+			}
+			remaining, _ := io.ReadAll(reader)
+			if !bytes.Equal(remaining, next) {
+				t.Fatalf("following request consumed: %q", remaining)
+			}
+		})
+	}
+}

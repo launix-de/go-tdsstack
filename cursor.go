@@ -93,7 +93,7 @@ func (s *snapshotWriter) Row(row []any) error {
 	size := 24 + 16*len(row)
 	err := catchWire(func() {
 		for i, v := range row {
-			encoded := encodeWireValue(s.columns[i], v)
+			encoded := encodeResultWireValue(s.columns[i], v)
 			size += len(encoded)
 			clone[i] = cloneWireValue(v)
 		}

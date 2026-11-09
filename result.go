@@ -50,6 +50,64 @@ func validType(t WireType) bool {
 	return false
 }
 
+// Nullable scalar families have fixed-width counterparts in result metadata.
+// Clients normalize a nonnullable family descriptor to this token, so its row
+// value must use the same fixed representation without an extra length byte.
+func fixedScalarKind(t WireType) byte {
+	switch t.Kind {
+	case 0x26:
+		switch t.Size {
+		case 1:
+			return 0x30
+		case 2:
+			return 0x34
+		case 4:
+			return 0x38
+		case 8:
+			return 0x7f
+		}
+	case 0x68:
+		return 0x32
+	case 0x6d:
+		if t.Size == 4 {
+			return 0x3b
+		}
+		return 0x3e
+	case 0x6e:
+		if t.Size == 4 {
+			return 0x7a
+		}
+		return 0x3c
+	case 0x6f:
+		if t.Size == 4 {
+			return 0x3a
+		}
+		return 0x3d
+	}
+	return 0
+}
+
+func resultWireKind(column Column) byte {
+	if column.Flags&1 == 0 {
+		if fixed := fixedScalarKind(column.WireType); fixed != 0 {
+			return fixed
+		}
+	}
+	return column.Kind
+}
+
+// Keep the public payload codecs unchanged for RPC, bulk and sql_variant.
+// Only result rows follow the fixed descriptor selected by resultWireKind.
+func encodeResultWireValue(column Column, value any) []byte {
+	if resultWireKind(column) != column.Kind {
+		if value == nil {
+			panic("nonnullable fixed-width result cannot contain NULL")
+		}
+		return encodeWireValue(column, value)[1:]
+	}
+	return encodeWireValue(column, value)
+}
+
 type resultWriter struct {
 	active         func() bool
 	mu             sync.Mutex
@@ -151,8 +209,9 @@ func (r *resultWriter) publish() {
 		col := &r.columns[i]
 		tdsU32(&metadata, col.UserType)
 		tdsU16(&metadata, col.Flags)
-		metadata.WriteByte(col.Kind)
-		switch col.Kind {
+		kind := resultWireKind(*col)
+		metadata.WriteByte(kind)
+		switch kind {
 		case 0x62:
 			tdsU32(&metadata, uint32(col.Size))
 		case 0x24, 0x26, 0x6d:
@@ -373,7 +432,7 @@ func (r *resultWriter) Row(values []any) error {
 		var row bytes.Buffer
 		row.WriteByte(0xd1)
 		for i, v := range values {
-			row.Write(encodeWireValue(r.columns[i], v))
+			row.Write(encodeResultWireValue(r.columns[i], v))
 		}
 		r.write(row.Bytes())
 	})

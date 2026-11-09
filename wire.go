@@ -189,20 +189,8 @@ func tdsDone(b *bytes.Buffer, token byte, status uint16, rows uint64) {
 }
 
 func tdsError(b *bytes.Buffer, number uint32, message string) {
-	// Bound the protocol message; detailed panics belong in the server log.
-	if len(message) > 2048 {
-		message = message[:2048]
-	}
-	var payload bytes.Buffer
-	tdsU32(&payload, number)
-	payload.Write([]byte{1, 16}) // state, severity
-	text := tdsUTF16(message)
-	tdsU16(&payload, uint16(len(text)/2))
-	payload.Write(text)
-	tdsBText(&payload, "TDS")
-	tdsBText(&payload, "")
-	tdsU32(&payload, 1)
-	tdsToken(b, 0xaa, payload.Bytes())
+	token, _ := tdsDiagnostic(0xaa, tdsDefaultDiagnostic(number, message))
+	b.Write(token)
 }
 
 func tdsDatabase(b *bytes.Buffer, current, previous string) {

@@ -138,33 +138,11 @@ func (r *resultWriter) Info(message Message) error {
 			return err
 		}
 	}
-	r.err = catchWire(func() {
-		var payload bytes.Buffer
-		if len(message.Text) > 3*65535 || len(message.Server) > 3*255 || len(message.Procedure) > 3*255 {
-			panic("informational message exceeds token field bounds")
-		}
-		for _, text := range []string{message.Text, message.Server, message.Procedure} {
-			if !utf8.ValidString(text) {
-				panic("informational message requires valid text")
-			}
-		}
-		text, server, procedure := tdsUTF16(message.Text), tdsUTF16(message.Server), tdsUTF16(message.Procedure)
-		if len(text)/2 > 65535 || len(server)/2 > 255 || len(procedure)/2 > 255 || 14+len(text)+len(server)+len(procedure) > 65535 {
-			panic("informational message exceeds token field bounds")
-		}
-		tdsU32(&payload, message.Number)
-		payload.Write([]byte{message.State, message.Severity})
-		tdsU16(&payload, uint16(len(text)/2))
-		payload.Write(text)
-		payload.WriteByte(byte(len(server) / 2))
-		payload.Write(server)
-		payload.WriteByte(byte(len(procedure) / 2))
-		payload.Write(procedure)
-		tdsU32(&payload, message.Line)
-		var token bytes.Buffer
-		tdsToken(&token, 0xab, payload.Bytes())
-		r.write(token.Bytes())
-	})
+	var token []byte
+	token, r.err = tdsDiagnostic(0xab, message)
+	if r.err == nil {
+		r.err = catchWire(func() { r.write(token) })
+	}
 	return r.err
 }
 

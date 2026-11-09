@@ -108,13 +108,26 @@ type TransactionRequest struct {
 	SuccessorIsolation byte
 }
 
-// Message is a TDS informational token payload selected by the application.
+// Message is an explicit TDS diagnostic payload selected by the application.
+// Info emits it as INFO; returning DiagnosticError emits it as ERROR.
 // The transport does not assign SQL meaning to its number, state or severity.
 type Message struct {
 	Number                  uint32
 	State, Severity         byte
 	Text, Server, Procedure string
 	Line                    uint32
+}
+
+// DiagnosticError preserves application-supplied ERROR fields through handler
+// errors wrapped with %w. Invalid diagnostics produce a bounded generic error;
+// wrapping text does not replace or prefix the explicit Message.Text.
+type DiagnosticError struct{ Message }
+
+func (e *DiagnosticError) Error() string {
+	if e == nil {
+		return "nil diagnostic error"
+	}
+	return e.Text
 }
 
 // ResultWriter permits sequential result sets and serializes parallel row

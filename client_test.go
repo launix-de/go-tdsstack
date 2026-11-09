@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -290,5 +291,89 @@ func TestResultConcurrentRows(t *testing.T) {
 	}
 	if rows.Err() != nil || len(seen) != 400 {
 		t.Fatal(len(seen), rows.Err())
+	}
+}
+
+func TestClientStructuredErrorsPreserveDiagnostic(t *testing.T) {
+	payload := Message{Number: 8115, State: 7, Severity: 16, Text: "bounded failure Grüße 🙂", Server: "node", Procedure: "load", Line: 70001}
+	db, _, _ := startClient(t, false, func(s *Server) {
+		execute, describe := s.Handler.Execute, s.Handler.Describe
+		s.Handler.Execute = func(ctx context.Context, session Session, r Request, w ResultWriter) error {
+			switch r.Text {
+			case "opaque structured failure":
+				return fmt.Errorf("outer context: %w", fmt.Errorf("backend context: %w", &DiagnosticError{Message: payload}))
+			case "opaque ordinary failure":
+				return errors.New("ordinary backend failure")
+			case "opaque nil diagnostic":
+				var failure *DiagnosticError
+				return fmt.Errorf("wrapped nil: %w", failure)
+			case "opaque invalid diagnostic":
+				return &DiagnosticError{Message: Message{Number: 8115, Procedure: strings.Repeat("🙂", 128)}}
+			}
+			return execute(ctx, session, r, w)
+		}
+		s.Handler.Describe = func(ctx context.Context, session Session, r Request) ([]Column, error) {
+			if r.Text == "opaque describe failure" {
+				return nil, fmt.Errorf("describe context: %w", &DiagnosticError{Message: payload})
+			}
+			return describe(ctx, session, r)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	check := func(t *testing.T, err error, want Message) {
+		t.Helper()
+		var actual tdsdriver.Error
+		if !errors.As(err, &actual) || uint32(actual.Number) != want.Number || actual.State != want.State || actual.Class != want.Severity ||
+			actual.Message != want.Text || actual.ServerName != want.Server || actual.ProcName != want.Procedure || uint32(actual.LineNo) != want.Line {
+			t.Fatalf("client lost error diagnostic: %#v / %v; want %#v", actual, err, want)
+		}
+	}
+	for _, method := range []string{"batch", "execute", "prepare", "prepexec", "prepared execute", "cursor"} {
+		t.Run(method, func(t *testing.T) {
+			var handle int64
+			switch method {
+			case "batch":
+				_, err = conn.ExecContext(ctx, "opaque structured failure")
+			case "execute":
+				_, err = conn.ExecContext(ctx, "sp_executesql", sql.Named("stmt", "opaque structured failure"))
+			case "prepare":
+				_, err = conn.ExecContext(ctx, "sp_prepare", sql.Named("handle", sql.Out{Dest: &handle}), sql.Named("params", ""), sql.Named("stmt", "opaque describe failure"))
+			case "prepexec":
+				_, err = conn.ExecContext(ctx, "sp_prepexec", sql.Named("handle", sql.Out{Dest: &handle}), sql.Named("params", ""), sql.Named("stmt", "opaque structured failure"))
+			case "prepared execute":
+				var prepared int64
+				if _, err := conn.ExecContext(ctx, "sp_prepare", sql.Named("handle", sql.Out{Dest: &prepared}), sql.Named("params", ""), sql.Named("stmt", "opaque structured failure")); err != nil || prepared <= 0 {
+					t.Fatal("pure preparation failed", prepared, err)
+				}
+				_, err = conn.ExecContext(ctx, "sp_execute", sql.Named("handle", prepared))
+				if _, cleanupError := conn.ExecContext(ctx, "sp_unprepare", sql.Named("handle", prepared)); cleanupError != nil {
+					t.Fatal("failed execution invalidated the prepared handle", cleanupError)
+				}
+			case "cursor":
+				var scroll, concurrency, count int64 = 8, 1, 0
+				_, err = conn.ExecContext(ctx, "sp_cursoropen", sql.Named("cursor", sql.Out{Dest: &handle}), sql.Named("stmt", "opaque structured failure"),
+					sql.Named("scroll", sql.Out{Dest: &scroll, In: true}), sql.Named("concurrency", sql.Out{Dest: &concurrency, In: true}), sql.Named("count", sql.Out{Dest: &count, In: true}))
+			}
+			check(t, err, payload)
+			if handle != 0 {
+				t.Fatal("failed request published a handle", handle)
+			}
+		})
+	}
+	_, err = conn.ExecContext(ctx, "opaque ordinary failure")
+	check(t, err, Message{Number: 50000, State: 1, Severity: 16, Text: "ordinary backend failure", Server: "TDS", Line: 1})
+	_, err = conn.ExecContext(ctx, "opaque nil diagnostic")
+	check(t, err, Message{Number: 50000, State: 1, Severity: 16, Text: "wrapped nil: nil diagnostic error", Server: "TDS", Line: 1})
+	_, err = conn.ExecContext(ctx, "opaque invalid diagnostic")
+	check(t, err, Message{Number: 50000, State: 1, Severity: 16, Text: "diagnostic fields exceed wire length limits", Server: "TDS", Line: 1})
+	var value int
+	if err := conn.QueryRowContext(ctx, "SELECT 1").Scan(&value); err != nil || value != 1 {
+		t.Fatal("error response corrupted the next request", value, err)
 	}
 }

@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -226,6 +228,137 @@ func TestBulkFrameworkShortDone(t *testing.T) {
 			remaining, _ := io.ReadAll(reader)
 			if !bytes.Equal(remaining, next) {
 				t.Fatalf("following request consumed: %q", remaining)
+			}
+		})
+	}
+}
+
+// Wide metadata, one row and DONE each span packet boundaries. The last value
+// positions DONE so its count is split between packets, never a message boundary.
+func wideBulkFixture() ([]byte, []any) {
+	var b bytes.Buffer
+	b.WriteByte(0x81)
+	tdsU16(&b, 224)
+	for i := 0; i < 224; i++ {
+		tdsU32(&b, 0)
+		tdsU16(&b, 1)
+		b.WriteByte(0xe7)
+		tdsU16(&b, 4000)
+		b.Write([]byte{9, 4, 0xd0, 0, 52})
+		tdsBText(&b, fmt.Sprintf("column_%03d", i))
+	}
+	values := make([]any, 224)
+	b.WriteByte(0xd1)
+	for i := range values {
+		value := fmt.Sprintf("v_%03d", i)
+		if i == len(values)-1 {
+			// Its own length prefix and UTF-16 value are still to be written.
+			beforeDone := b.Len() + 2 + len(tdsUTF16(value))
+			padding := (tdsPacketSize - 14 - beforeDone%(tdsPacketSize-8) + (tdsPacketSize - 8)) % (tdsPacketSize - 8)
+			value += strings.Repeat("x", padding/2)
+		}
+		values[i] = value
+		b.Write(encodeWireValue(Column{WireType: WireType{Kind: 0xe7, Size: 4000}}, value))
+	}
+	tdsDone(&b, 0xfd, 0x10, 1)
+	return b.Bytes(), values
+}
+
+func TestBulkContinuationStatusAndFraming(t *testing.T) {
+	payload, want := wideBulkFixture()
+	for _, name := range []string{"normal", "batch", "batch-final", "reserved", "ignore-first", "ignore-continuation", "reset", "reset-continuation", "reset-preserve", "truncated-header", "truncated-payload", "missing-eom", "wrong-continuation-kind"} {
+		t.Run(name, func(t *testing.T) {
+			var packets bytes.Buffer
+			if err := writeTDSMessage(&packets, 7, payload); err != nil {
+				t.Fatal(err)
+			}
+			wire := append([]byte(nil), packets.Bytes()...)
+			offsets := []int{}
+			for at := 0; at < len(wire); {
+				offsets = append(offsets, at)
+				at += int(binary.BigEndian.Uint16(wire[at+2:]))
+			}
+			if len(offsets) < 4 {
+				t.Fatal("fixture no longer crosses metadata, row and DONE packet boundaries")
+			}
+			for _, at := range offsets {
+				if wire[at+1]&1 == 0 {
+					wire[at+1] |= 4
+				}
+			}
+			valid := false
+			switch name {
+			case "normal":
+				for _, at := range offsets {
+					wire[at+1] &^= 4
+				}
+				valid = true
+			case "batch":
+				valid = true
+			case "batch-final":
+				wire[offsets[len(offsets)-1]+1] |= 4
+				valid = true
+			case "reserved":
+				for _, at := range offsets {
+					wire[at+1] |= 0xe0
+				}
+				valid = true
+			case "ignore-first":
+				wire[1] |= 2
+			case "ignore-continuation":
+				wire[offsets[1]+1] |= 2
+			case "reset":
+				wire[1] |= 8
+			case "reset-continuation":
+				wire[offsets[1]+1] |= 8
+			case "reset-preserve":
+				wire[1] |= 16
+			case "truncated-header":
+				wire = wire[:offsets[len(offsets)-1]+4]
+			case "truncated-payload":
+				wire = wire[:len(wire)-1]
+			case "missing-eom":
+				wire[offsets[len(offsets)-1]+1] &^= 1
+			case "wrong-continuation-kind":
+				wire[offsets[1]] = 1
+			}
+			following := []byte("following request")
+			completeWire := append(append([]byte(nil), wire...), following...)
+			// Truncation tests use actual EOF so bytes from another request cannot
+			// accidentally fill a deliberately truncated packet in the fixture.
+			if name == "truncated-header" || name == "truncated-payload" || name == "missing-eom" {
+				completeWire = wire
+			}
+			reader := bytes.NewReader(completeWire)
+			bulk, err := newBulkReader(context.Background(), &bulkPackets{r: reader})
+			if err == nil {
+				var row []any
+				row, err = bulk.Next()
+				if err == nil && valid && !reflect.DeepEqual(row, want) {
+					t.Fatal("packet boundary changed row", len(row))
+				}
+				if err == nil {
+					_, err = bulk.Next()
+				}
+			}
+			if valid {
+				if err != io.EOF || !bulk.complete {
+					t.Fatal("valid batch framing rejected", err)
+				}
+				if len(bulk.Columns()) != 224 || bulk.Columns()[223].Name != "column_223" {
+					t.Fatal("wide metadata changed")
+				}
+				rest, _ := io.ReadAll(reader)
+				if !bytes.Equal(rest, following) {
+					t.Fatal("following request consumed", string(rest))
+				}
+			} else if err == nil || err == io.EOF {
+				t.Fatal("malformed packet accepted", err)
+			}
+			if name == "ignore-first" || name == "reset" || name == "reset-preserve" {
+				if err == nil || !strings.Contains(err.Error(), "invalid bulk packet header") {
+					t.Fatal("header error masked", err)
+				}
 			}
 		})
 	}

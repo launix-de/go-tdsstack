@@ -19,7 +19,10 @@ transaction, and roll back on every error. Commit only after `Next()` returns
 trailing bytes, error/abort flags and malformed values never yield successful
 EOF. Returning from the handler without consuming the validated end is an error.
 An early application rejection drains the remaining packets without buffering;
-the next request retains its boundary. Bulk callbacks are request-local, serial,
+the next request retains its boundary. Bulk packet framing ignores unused
+status bits, including Framework SqlClient's ST_BATCH, as required by MS-TDS.
+IGNORE and connection-reset flags still reject the bulk message; only EOM ends
+the stream. Bulk callbacks are request-local, serial,
 and must not retain the reader. Supported scalar descriptors use the same exact
 codecs as RPC values; legacy TEXT/IMAGE, XML/UDT tokens and unrecognized types fail.
 

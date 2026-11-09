@@ -27,7 +27,11 @@ type BulkReader struct {
 
 func newBulkReader(ctx context.Context, input io.Reader) (*BulkReader, error) {
 	b := &BulkReader{ctx: ctx, d: tdsDecoder{reader: input, remaining: tdsMaxValue}}
-	if b.d.u8() != 0x81 {
+	token := b.d.u8()
+	if b.d.err != nil {
+		return nil, b.d.err
+	}
+	if token != 0x81 {
 		return nil, fmt.Errorf("bulk message requires COLMETADATA")
 	}
 	n := int(b.d.u16())
@@ -207,7 +211,8 @@ func (b *BulkReader) next() ([]any, error) {
 
 // bulkPackets exposes a single bounded packet at a time. It never consumes
 // bytes from the following request. IGNORE/RESET flags fail the message so an
-// aborted input cannot be mistaken for an ordinary end and committed.
+// aborted input cannot be mistaken for an ordinary end and committed. Unused
+// status bits (including Framework's ST_BATCH) are ignored per MS-TDS 2.2.3.1.2.
 type bulkPackets struct {
 	r               io.Reader
 	left            int
@@ -231,7 +236,7 @@ func (p *bulkPackets) Read(dst []byte) (int, error) {
 			return 0, err
 		}
 		p.left = int(binary.BigEndian.Uint16(header[2:4])) - 8
-		if header[0] != 7 || header[1]&^byte(1) != 0 || p.left < 0 || p.left == 0 && header[1]&1 == 0 {
+		if header[0] != 7 || header[1]&0x1a != 0 || p.left < 0 || p.left == 0 && header[1]&1 == 0 {
 			return 0, fmt.Errorf("invalid bulk packet header")
 		}
 		p.final = header[1]&1 != 0

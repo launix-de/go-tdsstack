@@ -84,3 +84,30 @@ func TestNonnullableScalarResultGoldens(t *testing.T) {
 		})
 	}
 }
+
+// Result metadata and values must preserve the same application-selected
+// numeric buffer. The transport must not silently normalize Size from Precision.
+func TestNumericResultPreservesExplicitBuffer(t *testing.T) {
+	for _, size := range []int{9, 17} {
+		for _, kind := range []byte{0x6a, 0x6c} {
+			var b bytes.Buffer
+			r := &resultWriter{w: &b, ctx: context.Background()}
+			columns := []Column{{Name: "n", WireType: WireType{Kind: kind, Size: size, Precision: 18}, Flags: 1}}
+			if err := r.Fields(columns); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Row([]any{Decimal{"42"}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Row([]any{nil}); err != nil {
+				t.Fatal(err)
+			}
+			want := []byte{0x81, 1, 0, 0, 0, 0, 0, 1, 0, kind, byte(size), 18, 0, 1, 'n', 0, 0xd1, byte(size), 1, 42}
+			want = append(want, make([]byte, size-2)...)
+			want = append(want, 0xd1, 0)
+			if !bytes.Equal(b.Bytes(), want) || columns[0].Size != size || r.columns[0].Size != size {
+				t.Fatalf("explicit numeric metadata/ROW changed: %x != %x", b.Bytes(), want)
+			}
+		}
+	}
+}

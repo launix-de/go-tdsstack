@@ -56,7 +56,7 @@ func TestTDSExactNumericWireValues(t *testing.T) {
 
 func TestTDSExactNumericMalformedValues(t *testing.T) {
 	for _, fixture := range [][]byte{
-		{0x6a, 17, 39, 0, 0}, {0x6a, 5, 9, 10, 0}, {0x6a, 9, 9, 0, 0},
+		{0x6a, 17, 39, 0, 0}, {0x6a, 5, 9, 10, 0}, {0x6a, 7, 9, 0, 0},
 		{0x6a, 5, 9, 0, 5, 2, 0, 0, 0, 0},
 		{0x6a, 5, 9, 0, 9, 1, 1, 0, 0, 0, 0, 0, 0, 0}, {0x6a, 5, 9, 0, 5, 1, 1},
 		{0x6e, 8, 4, 0, 0, 0, 0}, {0x6e, 3, 0},
@@ -76,4 +76,50 @@ func TestTDSExactNumericMalformedValues(t *testing.T) {
 	expectTDSPanic(t, func() {
 		tdsEncodeNumeric(tdsColumn{WireType: WireType{Kind: 0x6a, Precision: 9, Scale: 2, Size: 5}}, Decimal{"4294967296"})
 	})
+}
+
+// The explicit wire buffer may be wider than the minimum storage width for
+// precision. Framework SqlClient always writes all four coefficient words.
+func TestTDSNumericExplicitWiderBuffers(t *testing.T) {
+	for _, kind := range []byte{0x6a, 0x6c} {
+		for _, size := range []int{5, 9, 13, 17} {
+			column := Column{WireType: WireType{Kind: kind, Size: size, Precision: 9, Scale: 2}}
+			if !validType(column.WireType) {
+				t.Fatal("legal explicit width rejected", column)
+			}
+			for _, coefficient := range []string{"0", "42", "-42", "999999999"} {
+				value := Decimal{coefficient}
+				encoded := tdsEncodeNumeric(column, value)
+				if len(encoded) != size+1 || int(encoded[0]) != size {
+					t.Fatalf("explicit width %d changed: %x", size, encoded)
+				}
+				metadata := []byte{kind, byte(size), 9, 2}
+				decoder := tdsDecoder{data: append(metadata, encoded...)}
+				actual := decoder.parameter()
+				if decoder.err != nil || actual != value || decoder.descriptor != column.WireType || len(decoder.data) != 0 {
+					t.Fatal("wider input changed its descriptor/value", actual, decoder.err)
+				}
+				decoder = tdsDecoder{data: append(metadata, 0)}
+				if actual := decoder.parameter(); decoder.err != nil || actual != nil || decoder.descriptor != column.WireType || len(decoder.data) != 0 {
+					t.Fatal("wider typed NULL changed", actual, decoder.err)
+				}
+			}
+		}
+	}
+	// Independent 17-byte golden for a precision-18 coefficient, including sign.
+	column := Column{WireType: WireType{Kind: 0x6c, Size: 17, Precision: 18}}
+	want := []byte{17, 1, 42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	if actual := tdsEncodeNumeric(column, Decimal{"42"}); !bytes.Equal(actual, want) {
+		t.Fatalf("precision-18 wide golden: got %x want %x", actual, want)
+	}
+	for _, size := range []int{0, 1, 4, 6, 8, 12, 16, 18} {
+		column.Size = size
+		if validType(column.WireType) {
+			t.Fatal("illegal explicit width accepted", size)
+		}
+	}
+	column.Size = 5
+	if validType(column.WireType) {
+		t.Fatal("undersized metadata accepted for precision 18")
+	}
 }

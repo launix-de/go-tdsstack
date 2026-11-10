@@ -24,6 +24,16 @@ func tdsDecimalSize(precision int) int {
 	}
 }
 
+// Precision bounds the value domain, not the buffer advertised by a peer.
+// MS-TDS 2.2.5.4.3 permits 5/9/13/17-byte coefficients. A descriptor may
+// reserve a wider legal buffer (Framework SqlClient uses seventeen bytes),
+// but must still be capable of representing its complete declared precision.
+func validNumericType(t WireType) bool {
+	return t.Precision >= 1 && t.Precision <= 38 && t.Scale <= t.Precision &&
+		(t.Size == 5 || t.Size == 9 || t.Size == 13 || t.Size == 17) &&
+		t.Size >= tdsDecimalSize(int(t.Precision))
+}
+
 // Wire decoding produces an unscaled coefficient. Frontend callbacks receive
 // the complete descriptor, including for NULL, and choose its interpretation.
 func (d *tdsDecoder) numeric(kind byte) (value any) {
@@ -37,11 +47,11 @@ func (d *tdsDecoder) numeric(kind byte) (value any) {
 	d.descriptor = WireType{Kind: kind, Size: maxSize}
 	if kind == 0x6a || kind == 0x6c {
 		precision, scale := int(d.u8()), int(d.u8())
-		if precision < 1 || precision > 38 || scale < 0 || scale > precision || maxSize != tdsDecimalSize(precision) {
+		d.descriptor.Precision, d.descriptor.Scale = byte(precision), byte(scale)
+		if !validNumericType(d.descriptor) {
 			d.err = fmt.Errorf("invalid TDS coefficient metadata")
 			return nil
 		}
-		d.descriptor.Precision, d.descriptor.Scale = byte(precision), byte(scale)
 		n := int(d.u8())
 		if n == 0 {
 			return nil
@@ -121,7 +131,10 @@ func tdsEncodeNumeric(column tdsColumn, value any) []byte {
 	}
 	negative := integer.Sign() < 0
 	integer.Abs(integer)
-	size := tdsDecimalSize(int(column.Precision))
+	if !validNumericType(column.WireType) {
+		panic("invalid TDS coefficient metadata")
+	}
+	size := column.Size
 	if integer.BitLen() > (size-1)*8 {
 		panic("TDS coefficient exceeds wire width")
 	}

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 
 	driver "github.com/denisenkom/go-mssqldb"
 )
@@ -361,5 +362,68 @@ func TestBulkContinuationStatusAndFraming(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Independently authored mixed ROW bytes expose a coefficient-width mismatch:
+// a sender that claims nine bytes but emits seventeen must never reach EOF.
+func TestBulkNumericExplicitWidthAndFollowingRows(t *testing.T) {
+	for _, kind := range []byte{0x6a, 0x6c} {
+		for _, fixture := range []struct {
+			name              string
+			declared, emitted int
+			valid             bool
+		}{
+			{"compact", 9, 9, true},
+			{"framework-wide", 17, 17, true},
+			{"wrong-value-length", 9, 17, false},
+			{"truncated-wide", 17, 9, false},
+		} {
+			t.Run(fmt.Sprintf("%x/%s", kind, fixture.name), func(t *testing.T) {
+				var b bytes.Buffer
+				// COLMETADATA: fixed INT followed by nullable NUMERIC(18,0).
+				b.Write([]byte{0x81, 2, 0, 0, 0, 0, 0, 0, 0, 0x38, 1, 'i', 0})
+				b.Write([]byte{0, 0, 0, 0, 1, 0, kind, byte(fixture.declared), 18, 0, 1, 'n', 0})
+				b.Write([]byte{0xd1, 1, 0, 0, 0, byte(fixture.declared), 1, 42})
+				b.Write(make([]byte, fixture.emitted-2))
+				if fixture.name != "truncated-wide" {
+					b.Write([]byte{0xd1, 2, 0, 0, 0, 0}) // Numeric NULL, next row.
+					tdsDone(&b, 0xfd, 0x10, 2)
+				}
+				bulk, err := newBulkReader(context.Background(), iotest.OneByteReader(bytes.NewReader(b.Bytes())))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if columns := bulk.Columns(); len(columns) != 2 || columns[1].Size != fixture.declared || columns[1].Precision != 18 {
+					t.Fatal("explicit bulk metadata changed", columns)
+				}
+				first, err := bulk.Next()
+				if fixture.valid && (err != nil || !reflect.DeepEqual(first, []any{int64(1), Decimal{"42"}})) {
+					t.Fatal("first row changed", first, err)
+				}
+				var second []any
+				if err == nil {
+					second, err = bulk.Next()
+				}
+				if fixture.valid && (err != nil || !reflect.DeepEqual(second, []any{int64(2), nil})) {
+					t.Fatal("following row/NULL changed", second, err)
+				}
+				if err == nil {
+					_, err = bulk.Next()
+				}
+				if fixture.valid {
+					if err != io.EOF || !bulk.complete {
+						t.Fatal("valid stream did not complete", err)
+					}
+				} else {
+					if err == nil || err == io.EOF || bulk.complete {
+						t.Fatal("malformed coefficient completed", err)
+					}
+					if _, repeated := bulk.Next(); repeated != err {
+						t.Fatal("malformed stream lost sticky failure", repeated, err)
+					}
+				}
+			})
+		}
 	}
 }

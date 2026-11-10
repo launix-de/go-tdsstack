@@ -398,15 +398,15 @@ func TestBulkNumericExplicitWidthAndFollowingRows(t *testing.T) {
 					t.Fatal("explicit bulk metadata changed", columns)
 				}
 				first, err := bulk.Next()
-				if err == nil && fixture.valid && !reflect.DeepEqual(first, []any{int64(1), Decimal{"42"}}) {
-					t.Fatal("first row changed", first)
+				if fixture.valid && (err != nil || !reflect.DeepEqual(first, []any{int64(1), Decimal{"42"}})) {
+					t.Fatal("first row changed", first, err)
 				}
 				var second []any
 				if err == nil {
 					second, err = bulk.Next()
 				}
-				if err == nil && fixture.valid && !reflect.DeepEqual(second, []any{int64(2), nil}) {
-					t.Fatal("following row/NULL changed", second)
+				if fixture.valid && (err != nil || !reflect.DeepEqual(second, []any{int64(2), nil})) {
+					t.Fatal("following row/NULL changed", second, err)
 				}
 				if err == nil {
 					_, err = bulk.Next()

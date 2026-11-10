@@ -31,6 +31,14 @@ application parameters. It uses native Go data and opaque application sessions.
 Applications supply explicit column descriptors before rows, even for empty and
 all-NULL results. Parameters retain their wire descriptors, including typed NULL.
 
+Numeric coefficients preserve the explicit `WireType.Size` buffer independently
+of precision and scale. Legal 5/9/13/17-byte buffers can exceed the minimum width
+needed for their precision; encoders and decoders use the advertised buffer
+without silently resizing application descriptors. Applications interoperating
+with Framework `SqlBulkCopy` should explicitly offer a 17-byte numeric descriptor:
+that client writes four magnitude words, using the offered length in its prefix.
+A malformed sender claiming nine bytes while writing seventeen is still rejected.
+
 ```go
 server := &tds.Server{
     Database: "example",

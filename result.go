@@ -39,7 +39,7 @@ func validType(t WireType) bool {
 	case 0x6d, 0x6e, 0x6f:
 		return t.Size == 4 || t.Size == 8
 	case 0x6a, 0x6c:
-		return t.Precision >= 1 && t.Precision <= 38 && t.Scale <= t.Precision && t.Size == tdsDecimalSize(int(t.Precision))
+		return validNumericType(t)
 	case 0x28:
 		return true
 	case 0x29, 0x2a, 0x2b:

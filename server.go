@@ -543,7 +543,7 @@ func (c *connection) execute(m tdsMessage, conn net.Conn) (err error) {
 		if handle != 0 {
 			tdsReturnHandle(&b, handleName, handle)
 		}
-		tdsDone(&b, 0xfe, 0, 0)
+		tdsDone(&b, 0xfe, writer.diagnosticStatus(), 0)
 	}
 	if err = tdsWriteAll(w, b.Bytes()); err != nil {
 		return err

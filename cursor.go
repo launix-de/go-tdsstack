@@ -55,14 +55,21 @@ type snapshotWriter struct {
 	bytes        int
 	fields, done bool
 	ctx          context.Context
-	info         func(Message) error
+	diagnostic   func(MessageKind, Message) error
 }
 
 func (s *snapshotWriter) Info(message Message) error {
-	if s.info == nil {
-		return fmt.Errorf("cursor informational sink is unavailable")
+	return s.Diagnostic(KindInfo, message)
+}
+
+func (s *snapshotWriter) Diagnostic(kind MessageKind, message Message) error {
+	if s.done {
+		return fmt.Errorf("cursor result already completed")
 	}
-	return s.info(message)
+	if s.diagnostic == nil {
+		return fmt.Errorf("cursor diagnostic sink is unavailable")
+	}
+	return s.diagnostic(kind, message)
 }
 
 func (s *snapshotWriter) Fields(columns []Column) error {
@@ -133,7 +140,7 @@ func (s *snapshotWriter) Done(c Completion) error {
 	s.done = true
 	return nil
 }
-func (c *connection) openCursor(r tdsRPC, state *requestState, info func(Message) error) (*cursorSnapshot, int32) {
+func (c *connection) openCursor(r tdsRPC, state *requestState, diagnostic func(MessageKind, Message) error) (*cursorSnapshot, int32) {
 	a := r.arguments
 	if len(a) < 5 || c.server.Handler.Describe == nil {
 		panic("cursor requires pure describe")
@@ -170,7 +177,7 @@ func (c *connection) openCursor(r tdsRPC, state *requestState, info func(Message
 	if _, err := c.server.Handler.Describe(state.ctx, c.session, q); err != nil {
 		panic(err)
 	}
-	sink := &snapshotWriter{ctx: state.ctx, info: info}
+	sink := &snapshotWriter{ctx: state.ctx, diagnostic: diagnostic}
 	if err := c.server.Handler.Execute(state.ctx, c.session, q, sink); err != nil {
 		panic(err)
 	}
@@ -242,6 +249,7 @@ func (cursor *cursorSnapshot) rangeForFetch(kind, rownum, nrows int32) (start, e
 
 func (c *connection) cursorRPC(rpc tdsRPC, request *requestState, response *tdsResponse) (err error) {
 	var tokens bytes.Buffer
+	diagnostics := &resultWriter{w: response, ctx: request.ctx}
 	var openedHandle int32
 	completed := false
 	defer func() {
@@ -255,7 +263,10 @@ func (c *connection) cursorRPC(rpc tdsRPC, request *requestState, response *tdsR
 	position, fetched := 0, 0
 	switch rpc.procedure {
 	case 2:
-		cursor, handle := c.openCursor(rpc, request, (&resultWriter{w: response, ctx: request.ctx}).Info)
+		cursor, handle := c.openCursor(rpc, request, diagnostics.Diagnostic)
+		if diagnostics.err != nil {
+			return diagnostics.err
+		}
 		if c.cursors == nil {
 			c.cursors = make(map[int32]*cursorSnapshot)
 		}
@@ -265,7 +276,7 @@ func (c *connection) cursorRPC(rpc tdsRPC, request *requestState, response *tdsR
 		sink := &resultWriter{w: response, columns: cursor.wireColumns(), browseMetadata: c.browseMetadata}
 		sink.fields = true
 		sink.publish()
-		tdsDone(&tokens, 0xff, 1, 0)
+		tdsDone(&tokens, 0xff, 1|diagnostics.diagnosticStatus(), 0)
 		tokens.WriteByte(0x79)
 		tdsU32(&tokens, 0)
 		for _, output := range []struct {
@@ -410,7 +421,7 @@ func (c *connection) cursorRPC(rpc tdsRPC, request *requestState, response *tdsR
 		tokens.Reset()
 		tdsDone(&tokens, 0xfd, 0x20, 0)
 	} else {
-		tdsDone(&tokens, 0xfe, 0, 0)
+		tdsDone(&tokens, 0xfe, diagnostics.diagnosticStatus(), 0)
 	}
 	if _, err = response.Write(tokens.Bytes()); err != nil {
 		return err

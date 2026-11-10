@@ -69,6 +69,16 @@ finish all parallel row producers before returning. Cancellation covers the whol
 request, including `Describe`. Pure `Describe` validates prepared or cursor shapes
 without executing a statement. The library never constructs SQL transaction text.
 
+Handlers can optionally assert `DiagnosticWriter` on their `ResultWriter` and call
+`Diagnostic(KindInfo, message)` or `Diagnostic(KindError, message)`. The explicit
+kind selects INFO or ERROR; severity never selects a token or controls execution.
+`Info` remains equivalent to `KindInfo`, and existing `ResultWriter`
+implementations require no new method. Multiple diagnostics can precede or occur
+within a result. A successfully written ERROR sets DONE_ERROR on its result's
+completion and the final RPC completion; it does not abort the handler. Cursor
+execution forwards diagnostics to the current request without retaining the sink
+in a cursor snapshot. Applications own whether to continue or return an error.
+
 Handlers may return `&DiagnosticError{Message: Message{...}}` to emit explicit
 ERROR metadata; ordinary `%w` wrapping preserves it. The same `Message` payload
 and bounded UTF-16 encoder serve INFO and ERROR without changing `Info(Message)`

@@ -109,7 +109,8 @@ type TransactionRequest struct {
 }
 
 // Message is an explicit TDS diagnostic payload selected by the application.
-// Info emits it as INFO; returning DiagnosticError emits it as ERROR.
+// Info emits it as INFO; DiagnosticWriter can explicitly stream either kind.
+// Returning DiagnosticError emits a terminal ERROR.
 // The transport does not assign SQL meaning to its number, state or severity.
 type Message struct {
 	Number                  uint32
@@ -138,6 +139,22 @@ type ResultWriter interface {
 	Fields([]Column) error
 	Row([]any) error
 	Done(Completion) error
+}
+
+// MessageKind selects the wire token explicitly, independently of severity.
+type MessageKind byte
+
+const (
+	KindInfo MessageKind = iota + 1
+	KindError
+)
+
+// DiagnosticWriter is an optional extension to ResultWriter. Diagnostic streams
+// INFO or ERROR without ending the result or deciding whether execution continues.
+// A successful ERROR marks the corresponding completion with DONE_ERROR. The
+// handler still owns control flow and may return a separate DiagnosticError.
+type DiagnosticWriter interface {
+	Diagnostic(MessageKind, Message) error
 }
 
 // Handler callbacks own SQL/session semantics. Prepared text remains opaque to

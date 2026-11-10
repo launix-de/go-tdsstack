@@ -115,6 +115,8 @@ type resultWriter struct {
 	ctx            context.Context
 	columns        []Column
 	fields, done   bool
+	resultError    bool // Successful ERROR since the preceding completion.
+	hadError       bool // Successful ERROR anywhere in this response.
 	more           bool // Protected by mu; a preceding completion admits another result without metadata.
 	count          uint64
 	browseMetadata bool
@@ -125,6 +127,10 @@ type resultWriter struct {
 
 // Info emits an informational token without creating or completing a rowset.
 func (r *resultWriter) Info(message Message) error {
+	return r.Diagnostic(KindInfo, message)
+}
+
+func (r *resultWriter) Diagnostic(kind MessageKind, message Message) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.err != nil {
@@ -138,12 +144,35 @@ func (r *resultWriter) Info(message Message) error {
 			return err
 		}
 	}
+	var tokenKind byte
+	switch kind {
+	case KindInfo:
+		tokenKind = 0xab
+	case KindError:
+		tokenKind = 0xaa
+	default:
+		r.err = fmt.Errorf("invalid diagnostic kind %d", kind)
+		return r.err
+	}
 	var token []byte
-	token, r.err = tdsDiagnostic(0xab, message)
+	token, r.err = tdsDiagnostic(tokenKind, message)
 	if r.err == nil {
 		r.err = catchWire(func() { r.write(token) })
 	}
+	if r.err == nil && kind == KindError {
+		r.resultError, r.hadError = true, true
+	}
 	return r.err
+}
+
+// diagnosticStatus is also used by RPC paths that own their completion framing.
+func (r *resultWriter) diagnosticStatus() uint16 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.hadError {
+		return 2
+	}
+	return 0
 }
 
 func (r *resultWriter) Fields(columns []Column) error {
@@ -437,6 +466,9 @@ func (r *resultWriter) Done(c Completion) error {
 		}
 	}
 	status := uint16(0)
+	if r.resultError {
+		status |= 2
+	}
 	if r.active != nil && r.active() {
 		status |= 4
 	}
@@ -453,6 +485,9 @@ func (r *resultWriter) Done(c Completion) error {
 	}
 	tdsDone(&b, token, status, c.Rows)
 	r.err = tdsWriteAll(r.w, b.Bytes())
+	if r.err == nil {
+		r.resultError = false
+	}
 	r.done = true
 	r.more = c.More
 	r.fields = false

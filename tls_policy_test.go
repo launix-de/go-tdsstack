@@ -294,6 +294,48 @@ func TestLoginOnlyRejectsEncryptedExtraBeforeAuthentication(t *testing.T) {
 	}
 }
 
+func TestOptionalCertificateFailureNeverAuthenticates(t *testing.T) {
+	var authenticated atomic.Int64
+	_, dsn, _ := startClient(t, true, func(s *Server) {
+		s.EncryptionPolicy = EncryptionOptional
+		s.TLSConfig.Certificates = nil
+		s.TLSConfig.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return nil, fmt.Errorf("fixture certificate unavailable")
+		}
+		auth := s.Handler.Authenticate
+		s.Handler.Authenticate = func(ctx context.Context, l Login) (Session, error) {
+			authenticated.Add(1)
+			return auth(ctx, l)
+		}
+	})
+	for _, encryption := range []string{"false", "true"} {
+		db := openPolicyClient(t, strings.Replace(dsn, "encrypt=true", "encrypt="+encryption, 1))
+		if err := db.Ping(); err == nil || authenticated.Load() != 0 {
+			t.Fatal("certificate failure downgraded authentication", encryption, err, authenticated.Load())
+		}
+	}
+}
+
+func TestCloseDuringLoginOnlyHandshake(t *testing.T) {
+	var authenticated atomic.Int64
+	_, dsn, server := startClient(t, true, func(s *Server) {
+		s.EncryptionPolicy = EncryptionOptional
+		auth := s.Handler.Authenticate
+		s.Handler.Authenticate = func(ctx context.Context, l Login) (Session, error) {
+			authenticated.Add(1)
+			return auth(ctx, l)
+		}
+	})
+	raw := policyDial(t, dsn, 0)
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var data [1]byte
+	if _, err := raw.Read(data[:]); err == nil || authenticated.Load() != 0 {
+		t.Fatal("close retained handshake or authenticated", err, authenticated.Load())
+	}
+}
+
 func TestTLSRecordReaderDoesNotReadPlaintextAhead(t *testing.T) {
 	left, right := net.Pipe()
 	t.Cleanup(func() { left.Close(); right.Close() })

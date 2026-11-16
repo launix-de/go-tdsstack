@@ -51,7 +51,7 @@ func (*unusedListener) Addr() net.Addr              { return &net.TCPAddr{} }
 
 func TestEncryptionConfigurationBeforeAccept(t *testing.T) {
 	certificateCallback := func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return nil, fmt.Errorf("deferred fixture") }
-	for _, invalid := range []Server{
+	for _, invalid := range []*Server{
 		{EncryptionPolicy: EncryptionPolicy(255)},
 		{EncryptionPolicy: EncryptionOptional},
 		{EncryptionPolicy: EncryptionRequired},

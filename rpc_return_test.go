@@ -146,6 +146,19 @@ func TestRPCReturnCompletionValidationAndOwnership(t *testing.T) {
 	}
 }
 
+func TestRPCReturnDataCannotBeDiscardedByCursorSnapshot(t *testing.T) {
+	status := int32(17)
+	for _, completion := range []Completion{{ReturnStatus: &status}, {ReturnValues: []ReturnValue{{Status: 1}}}} {
+		w := &snapshotWriter{ctx: context.Background()}
+		if err := w.Done(completion); err == nil || w.done {
+			t.Fatal("cursor silently consumed RPC return data", err)
+		}
+		if err := w.Done(Completion{}); err != nil {
+			t.Fatal("rejected completion changed cursor state", err)
+		}
+	}
+}
+
 func TestReleasedClientRPCStatusAndOutputs(t *testing.T) {
 	db, _, _ := startClient(t, false, func(s *Server) {
 		s.Handler.Metadata = func(_ context.Context, _ Session, r Request, w ResultWriter) error {

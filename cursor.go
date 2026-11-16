@@ -134,6 +134,9 @@ func cloneWireValue(value any) any {
 }
 
 func (s *snapshotWriter) Done(c Completion) error {
+	if c.ReturnStatus != nil || len(c.ReturnValues) != 0 {
+		return fmt.Errorf("cursor snapshot cannot return RPC completion data")
+	}
 	if c.More || s.done {
 		return fmt.Errorf("cursor requires one result set")
 	}

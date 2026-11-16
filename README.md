@@ -57,6 +57,31 @@ if err != nil {
 return server.Serve(listener)
 ```
 
+`Server.EncryptionPolicy` separates certificate configuration from TDS
+negotiation. The zero value `EncryptionDefault` preserves existing behavior:
+nil `TLSConfig` is plaintext, and non-nil `TLSConfig` requires full TLS.
+`EncryptionRequired` also requires full TLS and rejects clients that cannot
+support it. `EncryptionOptional` negotiates full TLS when requested, TLS for
+only the first LOGIN7 packet when the client sends ENCRYPT_OFF, and plaintext
+when the client sends ENCRYPT_NOT_SUP. In login-only mode, continuation LOGIN7
+packets, server responses and subsequent traffic are plaintext, as specified
+by [MS-TDS](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-tds/d62e225b-d865-4ccc-8f73-de1ef49e30d4).
+
+Both explicit policies require a certificate-bearing `TLSConfig`. Optional
+requires TLS 1.2 support, without client-certificate authentication or
+`GetConfigForClient`; an arbitrary replacement authentication policy cannot be
+validated for TLS-incapable clients. `GetCertificate` remains supported. Only
+the login-only handshake is limited to TLS 1.2; full TLS and the default policy
+keep the configured version behavior. Full TLS clients retain their ordinary
+certificate trust and name checks. Login-only encryption does not provide
+authenticated or encrypted protection for subsequent traffic.
+
+Configure the server before serving and do not mutate its configuration while
+serving. `ValidateConfig()` optionally validates configuration before the caller
+opens a listener; `Serve` always validates before accepting connections. Neither
+method pre-executes certificate callbacks. The caller owns the listener and
+certificate loading; certificate failures never retry authentication in plaintext.
+
 `Authenticate` receives `Login.HostName` and `Login.AppName` exactly as supplied
 by the client in LOGIN7, including empty strings. These are untrusted client
 labels, not server configuration or authenticated identity. Applications may

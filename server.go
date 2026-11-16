@@ -34,6 +34,10 @@ func (s *Server) product() string {
 	return "TDS"
 }
 func (s *Server) Serve(l net.Listener) error {
+	transport, err := s.transportConfig()
+	if err != nil {
+		return err
+	}
 	if s.Handler.Authenticate == nil || s.Handler.Execute == nil {
 		return fmt.Errorf("authentication and execution handlers are required")
 	}
@@ -60,7 +64,7 @@ func (s *Server) Serve(l net.Listener) error {
 			return net.ErrClosed
 		}
 		connectionContext, cancelConnection := context.WithCancel(context.Background())
-		c := &connection{conn: socket, server: s, ctx: connectionContext, cancelConnection: cancelConnection}
+		c := &connection{conn: socket, server: s, transport: transport, ctx: connectionContext, cancelConnection: cancelConnection}
 		if s.state.connections == nil {
 			s.state.connections = make(map[*connection]bool)
 		}
@@ -151,6 +155,7 @@ type prepared struct {
 	bytes              int
 }
 type connection struct {
+	transport                 transportConfig
 	ctx                       context.Context
 	cancelConnection          context.CancelFunc
 	conn                      net.Conn
@@ -185,7 +190,7 @@ func (c *connection) serve() {
 			c.server.ErrorLog(fmt.Errorf("connection: %v", r))
 		}
 	}()
-	conn, login, err := c.server.handshake(c.ctx, c.conn)
+	conn, login, err := c.server.handshake(c.ctx, c.conn, c.transport)
 	if err != nil {
 		return
 	}

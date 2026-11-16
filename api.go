@@ -200,6 +200,23 @@ type Handler struct {
 	Reset func(context.Context, Session) (Session, error)
 	Close func(Session)
 }
+
+// EncryptionPolicy controls TDS 7.x negotiation, independently of certificates.
+type EncryptionPolicy uint8
+
+const (
+	// EncryptionDefault preserves the original behavior: no TLSConfig means
+	// plaintext, while a configured TLSConfig requires full encryption.
+	EncryptionDefault EncryptionPolicy = iota
+	// EncryptionOptional negotiates full TLS with encryption-requesting
+	// clients, login-only TLS with ENCRYPT_OFF and plaintext with NOT_SUP.
+	// TLSConfig must support TLS 1.2 and must not require client certificates
+	// or use GetConfigForClient. Certificate-only callbacks remain supported.
+	EncryptionOptional
+	// EncryptionRequired requires full TLS, rejecting TLS-incapable clients.
+	EncryptionRequired
+)
+
 type Server struct {
 	// Collation is an application-selected session default announced at login.
 	// The all-zero value preserves the legacy behavior of no announcement.
@@ -207,7 +224,9 @@ type Server struct {
 	Handler   Handler
 	Database  string
 	TLSConfig *tls.Config
-	Product   string
-	ErrorLog  func(error)
-	state     serverState
+	// Set configuration before Serve and do not mutate it while serving.
+	EncryptionPolicy EncryptionPolicy
+	Product          string
+	ErrorLog         func(error)
+	state            serverState
 }

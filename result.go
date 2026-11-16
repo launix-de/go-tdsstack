@@ -121,6 +121,8 @@ type resultWriter struct {
 	count          uint64
 	browseMetadata bool
 	rpc            bool
+	returnStatus   int32
+	returnValues   []byte
 	completion     func(Completion) error
 	err            error
 }
@@ -216,33 +218,9 @@ func (r *resultWriter) publish() {
 		col := &r.columns[i]
 		tdsU32(&metadata, col.UserType)
 		tdsU16(&metadata, col.Flags)
-		kind := resultWireKind(*col)
-		metadata.WriteByte(kind)
-		switch kind {
-		case 0x62:
-			tdsU32(&metadata, uint32(col.Size))
-		case 0x24, 0x26, 0x6d:
-			size := col.Size
-			metadata.WriteByte(byte(size))
-		case 0x68:
-			metadata.WriteByte(1)
-		case 0x6a, 0x6c:
-			metadata.Write([]byte{byte(col.Size), col.Precision, col.Scale})
-		case 0x6e:
-			metadata.WriteByte(byte(col.Size))
-		case 0x6f:
-			metadata.WriteByte(byte(col.Size))
-		case 0x28:
-		case 0x29, 0x2a, 0x2b:
-			metadata.WriteByte(col.Scale)
-		case 0xa5, 0xad:
-			size := col.Size
-			tdsU16(&metadata, uint16(size))
-		case 0xe7, 0xef, 0xa7, 0xaf:
-			size := col.Size
-			tdsU16(&metadata, uint16(size)) // NVARCHAR(MAX), PLP values
-			metadata.Write(col.Collation[:])
-		}
+		descriptor := col.WireType
+		descriptor.Kind = resultWireKind(*col)
+		tdsTypeInfo(&metadata, descriptor)
 		tdsBText(&metadata, col.Name)
 	}
 	if r.browseMetadata {
@@ -457,6 +435,23 @@ func (r *resultWriter) Done(c Completion) error {
 	if r.done && !r.more {
 		return fmt.Errorf("result already completed")
 	}
+	if r.ctx != nil {
+		if err := r.ctx.Err(); err != nil {
+			return err
+		}
+	}
+	if c.ReturnStatus != nil || len(c.ReturnValues) != 0 {
+		if !r.rpc || c.More {
+			return fmt.Errorf("RPC return data requires a final RPC completion")
+		}
+	}
+	var returns []byte
+	if r.rpc && !c.More {
+		returns, r.err = encodeReturnValues(c.ReturnValues)
+		if r.err != nil {
+			return r.err
+		}
+	}
 	if c.CountRows {
 		c.Rows = r.count
 	}
@@ -487,10 +482,30 @@ func (r *resultWriter) Done(c Completion) error {
 	r.err = tdsWriteAll(r.w, b.Bytes())
 	if r.err == nil {
 		r.resultError = false
+		if r.rpc && !c.More {
+			r.returnStatus = 0
+			if c.ReturnStatus != nil {
+				r.returnStatus = *c.ReturnStatus
+			}
+			r.returnValues = returns
+		}
 	}
 	r.done = true
 	r.more = c.More
 	r.fields = false
 	r.columns = nil
 	return r.err
+}
+
+// The server calls this only after successful execution. Failed or cancelled
+// requests never publish staged return data.
+func (r *resultWriter) rpcCompletion(b *bytes.Buffer, handleName string, handle int32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b.WriteByte(0x79)
+	tdsU32(b, uint32(r.returnStatus))
+	if handle != 0 {
+		tdsReturnHandle(b, handleName, handle)
+	}
+	b.Write(r.returnValues)
 }

@@ -433,7 +433,7 @@ func (c *connection) execute(m tdsMessage, conn net.Conn) (err error) {
 			return err
 		}
 	}
-	request := Request{Database: c.database, BrowseMetadata: c.browseMetadata}
+	request := Request{Database: c.database, BrowseMetadata: c.browseMetadata, RPC: rpc}
 	execute := true
 	switch m.kind {
 	case 7:
@@ -538,11 +538,7 @@ func (c *connection) execute(m tdsMessage, conn net.Conn) (err error) {
 	if r.finish() {
 		tdsDone(&b, 0xfd, 0x20, 0)
 	} else if rpc {
-		b.WriteByte(0x79)
-		tdsU32(&b, 0)
-		if handle != 0 {
-			tdsReturnHandle(&b, handleName, handle)
-		}
+		writer.rpcCompletion(&b, handleName, handle)
 		tdsDone(&b, 0xfe, writer.diagnosticStatus(), 0)
 	}
 	if err = tdsWriteAll(w, b.Bytes()); err != nil {

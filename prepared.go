@@ -19,7 +19,7 @@ func rpcParameters(r tdsRPC, start int) []Parameter {
 	}
 	p := make([]Parameter, len(r.arguments)-start)
 	for i, a := range r.arguments[start:] {
-		p[i] = Parameter{a.name, a.flags, r.wireDescriptors[i+start], a.value}
+		p[i] = Parameter{Name: a.name, Flags: a.flags, Type: r.wireDescriptors[i+start], Value: a.value, Ordinal: uint16(i + start)}
 	}
 	return p
 }
@@ -51,6 +51,7 @@ func (c *connection) removePrepared(handle int32) {
 }
 func (c *connection) prepareRPC(ctx context.Context, r tdsRPC, w *resultWriter) (q Request, handle int32, name string, execute bool, err error) {
 	q.Database = c.database
+	q.RPC = true
 	a := r.arguments
 	execute = true
 	switch r.procedure {
@@ -134,11 +135,6 @@ func (c *connection) prepareRPC(ctx context.Context, r tdsRPC, w *resultWriter) 
 		c.preparedBytes += size
 	default:
 		return q, 0, "", false, fmt.Errorf("unsupported prepared RPC")
-	}
-	for _, p := range q.Parameters {
-		if p.Flags != 0 {
-			return q, handle, name, false, fmt.Errorf("statement output parameters unsupported")
-		}
 	}
 	return
 }

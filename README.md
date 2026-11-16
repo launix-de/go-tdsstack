@@ -105,6 +105,21 @@ changes, transaction state and further results. A handler with one result can om
 are serialized only at this output boundary. Each row is completely validated
 before publishing its ROW token, so malformed payloads cannot swallow an error token.
 
+The final RPC `Done` may supply `Completion.ReturnStatus` (an optional `*int32`)
+and `Completion.ReturnValues`. An omitted status keeps the successful default 0.
+Each `ReturnValue` supplies its explicit descriptor, name, original zero-based
+parameter ordinal, status (1 for procedure OUTPUT, 2 for a scalar UDF return),
+user type, flags and value. `Parameter.Ordinal` retains that original position
+even when prepared execution consumes control parameters. The application binds
+OUTPUT parameters and performs copy-in/out conversions; the transport never
+parses declarations or derives a descriptor from a Go value.
+
+Return data is validated and copied at the final `Done`, then emitted after all
+result sets and before DONEPROC, only if the handler succeeds without cancellation.
+MAX output values follow the small outputs, preserving order within each group
+and retaining original ordinals. Existing prepared handles precede those outputs.
+Return data on a non-RPC or intermediate completion fails before publication.
+
 Use `int64`, `float64`, `bool`, `string`, `[]byte`, or `nil` for ordinary wire values.
 Standalone GUIDTYPE (`0x24`, Size 16) uses exactly sixteen canonical UUID bytes
 in `[]byte`, or `nil` for NULL. The codec owns the TDS mixed-endian field order;
@@ -139,8 +154,8 @@ handles become visible only after successful response publication. Failed or
 cancelled publication removes them.
 
 Explicitly unsupported: MARS, integrated authentication, password changes,
-RESETCONNECTIONSKIPTRAN, nonstatic/updatable cursors, arbitrary output statement
-parameters, unsupported code pages and unrecognized wire types. Frontends determine
+RESETCONNECTIONSKIPTRAN, nonstatic/updatable cursors, encrypted output parameters,
+unsupported code pages and unrecognized wire types. Frontends determine
 which SQL grammar and type domains they support.
 
 Verification:

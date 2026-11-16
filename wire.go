@@ -428,6 +428,7 @@ func (d *tdsDecoder) parameter() any {
 		var collation []byte
 		if kind != 0xa5 && kind != 0xad {
 			collation = d.take(5)
+			copy(d.descriptor.Collation[:], collation)
 		} // collation
 		var value []byte
 		if maxSize == 0xffff {
@@ -567,6 +568,65 @@ func decodeTDSRPC(data []byte) (tdsRPC, error) {
 
 func tdsReturnHandle(b *bytes.Buffer, name string, handle int32) {
 	tdsReturnInteger(b, name, 0, handle)
+}
+
+// TYPE_INFO is shared by row metadata and RPC outputs. Row callers select a
+// fixed-width kind first; parameters retain their declared nullable family.
+func tdsTypeInfo(b *bytes.Buffer, t WireType) {
+	b.WriteByte(t.Kind)
+	switch t.Kind {
+	case 0x62:
+		tdsU32(b, uint32(t.Size))
+	case 0x24, 0x26, 0x68, 0x6d, 0x6e, 0x6f:
+		b.WriteByte(byte(t.Size))
+	case 0x6a, 0x6c:
+		b.Write([]byte{byte(t.Size), t.Precision, t.Scale})
+	case 0x29, 0x2a, 0x2b:
+		b.WriteByte(t.Scale)
+	case 0xa5, 0xad:
+		tdsU16(b, uint16(t.Size))
+	case 0xe7, 0xef, 0xa7, 0xaf:
+		tdsU16(b, uint16(t.Size))
+		b.Write(t.Collation[:])
+	}
+}
+
+func encodeReturnValues(values []ReturnValue) (encoded []byte, err error) {
+	if len(values) > 65535 {
+		return nil, fmt.Errorf("too many RPC return values")
+	}
+	err = catchWire(func() {
+		var small, large bytes.Buffer
+		for _, value := range values {
+			if !validType(value.WireType) {
+				panic("invalid RPC return descriptor")
+			}
+			if value.Status != 1 && value.Status != 2 {
+				panic("invalid RPC return status")
+			}
+			if value.Flags&0x800 != 0 {
+				panic("encrypted RPC returns unsupported")
+			}
+			b := &small
+			if value.Size == 65535 {
+				switch value.Kind {
+				case 0xa5, 0xad, 0xe7, 0xef, 0xa7, 0xaf:
+					b = &large
+				}
+			}
+			b.WriteByte(0xac)
+			tdsU16(b, value.Ordinal)
+			tdsBText(b, value.Name)
+			b.WriteByte(value.Status)
+			tdsU32(b, value.UserType)
+			tdsU16(b, value.Flags)
+			tdsTypeInfo(b, value.WireType)
+			b.Write(encodeWireValue(Column{WireType: value.WireType}, value.Value))
+		}
+		small.Write(large.Bytes())
+		encoded = small.Bytes()
+	})
+	return
 }
 
 func tdsReturnInteger(b *bytes.Buffer, name string, ordinal uint16, value int32) {

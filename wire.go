@@ -38,15 +38,25 @@ type tdsMessage struct {
 	bulk         *io.PipeReader
 }
 
+func readTDSPacketHeader(r io.Reader) (header [8]byte, size int, err error) {
+	if _, err = io.ReadFull(r, header[:]); err != nil {
+		return
+	}
+	size = int(binary.BigEndian.Uint16(header[2:4])) - len(header)
+	if size < 0 || size == 0 && header[1]&1 == 0 {
+		err = fmt.Errorf("invalid TDS packet length")
+	}
+	return
+}
+
 func readTDSMessage(r io.Reader) (tdsMessage, error) {
 	var message tdsMessage
 	for packet := 0; ; packet++ {
-		var header [8]byte
-		if _, err := io.ReadFull(r, header[:]); err != nil {
+		header, n, err := readTDSPacketHeader(r)
+		if err != nil {
 			return message, err
 		}
-		n := int(binary.BigEndian.Uint16(header[2:4])) - 8
-		if n < 0 || n+len(message.data) > tdsMaxMessage || (n == 0 && header[1]&1 == 0) || packet >= 65536 {
+		if n+len(message.data) > tdsMaxMessage || packet >= 65536 {
 			return message, fmt.Errorf("invalid or oversized TDS packet")
 		}
 		if packet == 0 {

@@ -20,7 +20,7 @@ type tdsTLSHandshakeConn struct {
 }
 
 func (c *tdsTLSHandshakeConn) Read(data []byte) (int, error) {
-	if c.raw {
+	if c.raw && len(c.buffer) == 0 {
 		return c.Conn.Read(data)
 	}
 	if len(c.buffer) == 0 {
@@ -85,7 +85,7 @@ type tdsLogin struct {
 
 func decodeTDSLogin(data []byte) (tdsLogin, error) {
 	var login tdsLogin
-	if len(data) < 94 || int(binary.LittleEndian.Uint32(data)) != len(data) {
+	if len(data) < 94 || len(data) > 131071 || int(binary.LittleEndian.Uint32(data)) != len(data) {
 		return login, fmt.Errorf("invalid LOGIN7 length")
 	}
 	if binary.LittleEndian.Uint32(data[4:]) < 0x74000004 {
@@ -131,7 +131,7 @@ func decodeTDSLogin(data []byte) (tdsLogin, error) {
 	return login, nil
 }
 
-func (s *Server) handshake(ctx context.Context, conn net.Conn) (net.Conn, tdsLogin, error) {
+func (s *Server) handshake(ctx context.Context, conn net.Conn, transport transportConfig) (net.Conn, tdsLogin, error) {
 	var login tdsLogin
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	message, err := readTDSMessage(conn)
@@ -145,29 +145,35 @@ func (s *Server) handshake(ctx context.Context, conn net.Conn) (net.Conn, tdsLog
 	if err != nil {
 		return conn, login, err
 	}
-	answer := byte(2) // ENCRYPT_NOT_SUP when no certificate was configured
-	if s.TLSConfig != nil {
-		answer = 3
-	} // ENCRYPT_REQ: never downgrade a TLS listener
+	answer, useTLS, loginOnly, negotiationErr := transport.negotiate(encryption)
 	response := []byte{0, 0, 11, 0, 6, 1, 0, 17, 0, 1, 0xff, 16, 0, 0, 1, 0, 0, answer}
 	if err := writeTDSMessage(conn, 4, response); err != nil {
 		return conn, login, err
 	}
-	if s.TLSConfig != nil {
-		if encryption == 2 {
-			return conn, login, fmt.Errorf("this TDS listener requires encryption")
-		}
+	if negotiationErr != nil {
+		return conn, login, negotiationErr
+	}
+	if useTLS {
 		wrapper := &tdsTLSHandshakeConn{Conn: conn}
-		encrypted := tls.Server(wrapper, s.TLSConfig)
+		var encrypted *tls.Conn
+		if loginOnly {
+			encrypted = tls.Server(&tlsRecordConn{Conn: wrapper}, loginOnlyTLSConfig(transport.tls))
+		} else {
+			encrypted = tls.Server(wrapper, transport.tls)
+		}
 		if err := encrypted.Handshake(); err != nil {
 			return conn, login, err
 		}
 		wrapper.raw = true
-		conn = encrypted
-	} else if encryption == 1 || encryption == 3 {
-		return conn, login, fmt.Errorf("TDS TLS certificate is not configured")
+		if loginOnly {
+			message, err = readLoginOnlyMessage(encrypted, wrapper)
+		} else {
+			conn = encrypted
+			message, err = readTDSMessage(conn)
+		}
+	} else {
+		message, err = readTDSMessage(conn)
 	}
-	message, err = readTDSMessage(conn)
 	if err != nil {
 		return conn, login, err
 	}

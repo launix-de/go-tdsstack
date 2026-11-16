@@ -28,6 +28,23 @@ type Parameter struct {
 	Flags byte
 	Type  WireType
 	Value any
+	// Ordinal is the zero-based position in the original RPC, including any
+	// control parameters consumed by prepared execution.
+	Ordinal uint16
+}
+
+// ReturnValue describes an RPC output explicitly. The application owns binding,
+// SQL conversion and the choice of descriptor; the transport only encodes it.
+// Ordinal retains the original RPC position even when LOB values are sent last.
+// Status is 1 for a procedure output parameter or 2 for a scalar UDF return.
+type ReturnValue struct {
+	WireType
+	Name     string
+	Ordinal  uint16
+	Status   byte
+	UserType uint32
+	Flags    uint16
+	Value    any
 }
 
 // Decimal carries the unscaled base-ten integer, without rounding or casts.
@@ -76,6 +93,9 @@ type Request struct {
 	Database, Text, Declarations, Procedure string
 	Parameters                              []Parameter
 	Cursor                                  bool
+	// RPC permits return data in the final completion. Cursor snapshot
+	// execution is separate from its enclosing cursor-control RPC.
+	RPC bool
 }
 type Completion struct {
 	Rows          uint64
@@ -83,6 +103,11 @@ type Completion struct {
 	NoCount, More bool
 	Database      string
 	Transaction   TransactionState
+	// RPC results belong to the final completion (More false). A nil status
+	// preserves the legacy successful status 0. Values are copied/encoded by
+	// Done and published only after the handler succeeds, before DONEPROC.
+	ReturnStatus *int32
+	ReturnValues []ReturnValue
 }
 type TransactionState byte
 

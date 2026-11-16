@@ -109,12 +109,13 @@ func TestReleasedClientOptionalEncryption(t *testing.T) {
 			}
 		})
 	}
-	// A self-signed certificate is not trusted for full TLS. Login-only does
-	// not authenticate the server certificate, matching the TDS client profile.
+	// This released Go client honors TrustServerCertificate=false even for
+	// login-only encryption. Certificate validation belongs to the client;
+	// the server must not reinterpret its choice or retry without TLS.
 	for _, fixture := range []struct {
 		encrypt  string
 		rejected bool
-	}{{"true", true}, {"false", false}} {
+	}{{"true", true}, {"false", true}} {
 		db := openPolicyClient(t, strings.Replace(strings.Replace(dsn, "encrypt=true", "encrypt="+fixture.encrypt, 1), "TrustServerCertificate=true", "TrustServerCertificate=false", 1))
 		var value int64
 		err := db.QueryRow("SELECT 1").Scan(&value)
